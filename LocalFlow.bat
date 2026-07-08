@@ -1,5 +1,14 @@
 @echo off
-rem Launch LocalFlow with a console window (useful for first runs / debugging).
+rem Launch LocalFlow with a console window (useful for debugging).
 cd /d "%~dp0"
-py -3.13 localflow.py
+
+if exist .venv goto :venv_ok
+echo [ERROR] Virtual environment .venv not found.
+echo Please run setup.bat first to install dependencies!
+echo.
+pause
+exit /b 1
+
+:venv_ok
+.venv\Scripts\python.exe localflow.py
 pause

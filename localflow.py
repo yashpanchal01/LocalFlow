@@ -8,6 +8,9 @@ up with a local Ollama model, and pasted into whatever app has focus.
 Everything runs on-device. No cloud, no subscription.
 """
 
+import os
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+
 import ctypes
 import io
 import json
@@ -1031,7 +1034,7 @@ class App:
             self.overlay.state = status
         if self.tray:
             self.tray.setIcon(_tray_icon(status))
-            self.tray.setToolTip(f"LocalFlow — {status}")
+            self.tray.setToolTip(f"LocalFlow ({HOTKEY_NAME}) — {status}")
 
     def quit(self):
         log("Quitting.")
@@ -1115,7 +1118,7 @@ def main():
     menu = QtWidgets.QMenu()
     menu.addAction("Quit LocalFlow", app.quit)
     tray.setContextMenu(menu)
-    tray.setToolTip("LocalFlow — idle")
+    tray.setToolTip(f"LocalFlow ({HOTKEY_NAME}) — idle")
     tray.show()
     app.tray = tray
     app.notifier.message.connect(
