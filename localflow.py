@@ -31,16 +31,18 @@ HOTKEY_MODS = 0x0002 | 0x0001 | 0x4000    # MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
 HOTKEY_VK = 0xBF                          # VK_OEM_2, the / ? key
 HOTKEY_NAME = "Ctrl+Alt+/"
 
-WHISPER_MODEL = "distil-large-v3"   # accuracy; small.en if VRAM gets tight
-# TODO: upgrade to "distil-whisper/distil-large-v3.5-ct2" (lower WER, same VRAM)
-# once the Windows HF-cache symlink issue is resolved: first download hits
-# WinError 1314 (needs Developer Mode / admin, or HF_HUB_DISABLE_SYMLINKS).
+WHISPER_MODEL = "distil-whisper/distil-large-v3.5-ct2"  # lower WER, same VRAM
+# small.en if VRAM gets tight. Upgraded from distil-large-v3 on 2026-07-09
+# once Developer Mode was enabled (fixed the WinError 1314 symlink issue).
 # See docs/research/improving-localflow.md §2a.
 WHISPER_COMPUTE = "int8_float16"    # quantized on GPU = fits next to the LLM
 OLLAMA_MODEL = "qwen2.5:3b"     # small enough to always fit next to whisper
 OLLAMA_URL = "http://localhost:11434"
 OLLAMA_KEEP_ALIVE = "2h"        # keep model warm between dictations
-OLLAMA_NUM_CTX = 2048           # small context = far less VRAM than default
+OLLAMA_NUM_CTX = 1024           # small context = less VRAM + faster prefill.
+# 1024 comfortably fits the ~150-tok system prompt + a typical dictation +
+# its cleaned output; bump back toward 2048 if you routinely dictate long
+# (~90s+) monologues and see the cleanup get truncated.
 OLLAMA_TIMEOUT = 30             # give up and paste raw transcript after this
 MAX_RECORD_SECONDS = 120        # safety cutoff
 LIVE_PREVIEW_EVERY = 2.0        # seconds between live-transcription passes
@@ -701,6 +703,10 @@ class App:
     def cleanup_text(self, text):
         if len(text.split()) <= 3:      # too short to bother the LLM
             return quick_clean(text)
+        # cleaned text is ~the length of the input, never much longer; cap the
+        # generation so a model that ignores the prompt and rambles can't run
+        # to the full context window (the worst-case latency spike).
+        max_out = min(512, len(text.split()) * 3 + 64)
         try:
             parts = []
             with OLLAMA_SESSION.post(
@@ -714,7 +720,8 @@ class App:
                     "stream": True,
                     "keep_alive": OLLAMA_KEEP_ALIVE,
                     "options": {"temperature": 0.1,
-                                "num_ctx": OLLAMA_NUM_CTX},
+                                "num_ctx": OLLAMA_NUM_CTX,
+                                "num_predict": max_out},
                 },
                 timeout=OLLAMA_TIMEOUT,
                 stream=True,
