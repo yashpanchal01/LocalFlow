@@ -44,7 +44,42 @@ def setup_ollama():
         print("  2. Run the command: ollama pull qwen2.5:3b")
         print("="*70 + "\n")
 
-def setup_startup_shortcut():
+def save_ico_file():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    ico_path = os.path.join(script_dir, "localflow.ico")
+    if os.path.exists(ico_path):
+        return ico_path
+        
+    print("\n[Setup] Generating application icon (localflow.ico)...")
+    try:
+        from PySide6 import QtCore, QtGui, QtWidgets
+        # Create a dummy app to initialize Qt GUI subsystem safely
+        _qapp = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        
+        pm = QtGui.QPixmap(64, 64)
+        pm.fill(QtCore.Qt.transparent)
+        p = QtGui.QPainter(pm)
+        p.setRenderHint(QtGui.QPainter.Antialiasing)
+        p.setBrush(QtGui.QColor(20, 20, 32))
+        p.setPen(QtGui.QPen(QtGui.QColor(48, 48, 74), 2))
+        p.drawRoundedRect(5, 5, 54, 54, 16, 16)
+        p.setBrush(QtGui.QColor(126, 132, 170))
+        p.setPen(QtCore.Qt.NoPen)
+        p.drawRoundedRect(26, 13, 12, 24, 6, 6)
+        pen = QtGui.QPen(QtGui.QColor(126, 132, 170), 3)
+        pen.setCapStyle(QtCore.Qt.RoundCap)
+        p.setPen(pen)
+        p.drawArc(20, 22, 24, 22, 180 * 16, 180 * 16)
+        p.drawLine(32, 44, 32, 50)
+        p.drawLine(25, 51, 39, 51)
+        p.end()
+        pm.save(ico_path, "ICO")
+        print(f"[Setup] Generated icon file successfully at:\n  {ico_path}")
+    except Exception as e:
+        print(f"[WARNING] Failed to generate localflow.ico: {e}")
+    return ico_path
+
+def setup_startup_shortcut(ico_path):
     print("\nWould you like LocalFlow to start automatically on Windows boot? (y/n)")
     try:
         choice = input("> ").strip().lower()
@@ -58,11 +93,12 @@ def setup_startup_shortcut():
             startup_dir = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
             lnk_path = os.path.join(startup_dir, "LocalFlow.lnk")
             
-            # PowerShell command to create a Windows shortcut (.lnk)
+            # PowerShell command to create a Windows shortcut (.lnk) with custom icon
             ps_cmd = (
                 f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk_path}');"
                 f"$s.TargetPath='{vbs_path}';"
                 f"$s.WorkingDirectory='{script_dir}';"
+                f"$s.IconLocation='{ico_path}';"
                 f"$s.Save()"
             )
             subprocess.run(["powershell", "-Command", ps_cmd], check=True, stdout=subprocess.DEVNULL)
@@ -72,7 +108,7 @@ def setup_startup_shortcut():
     else:
         print("[Setup] Skipped autostart shortcut configuration.")
 
-def setup_start_menu_shortcut():
+def setup_start_menu_shortcut(ico_path):
     print("\n[Setup] Creating Start Menu shortcut...")
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -80,11 +116,12 @@ def setup_start_menu_shortcut():
         programs_dir = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")
         lnk_path = os.path.join(programs_dir, "LocalFlow.lnk")
         
-        # PowerShell command to create a Windows shortcut (.lnk)
+        # PowerShell command to create a Windows shortcut (.lnk) with custom icon
         ps_cmd = (
             f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk_path}');"
             f"$s.TargetPath='{vbs_path}';"
             f"$s.WorkingDirectory='{script_dir}';"
+            f"$s.IconLocation='{ico_path}';"
             f"$s.Save()"
         )
         subprocess.run(["powershell", "-Command", ps_cmd], check=True, stdout=subprocess.DEVNULL)
@@ -120,11 +157,14 @@ def main():
     # Setup Ollama model
     setup_ollama()
     
+    # Generate custom ICO file matching tray icon
+    ico_path = save_ico_file()
+    
     # Create Start Menu shortcut
-    setup_start_menu_shortcut()
+    setup_start_menu_shortcut(ico_path)
     
     # Create startup shortcut
-    setup_startup_shortcut()
+    setup_startup_shortcut(ico_path)
     
     print("\n[Setup] Dependency setup helper completed successfully!")
 
