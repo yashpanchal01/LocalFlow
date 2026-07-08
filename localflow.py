@@ -611,6 +611,25 @@ class Overlay(QtWidgets.QWidget):
 
 
 def _tray_icon(status="idle"):
+    ico_path = os.path.join(APP_DIR, "localflow.ico")
+    if os.path.exists(ico_path):
+        pm = QtGui.QPixmap(ico_path)
+        if not pm.isNull():
+            dot_color = {"recording": QtGui.QColor("#ff5c6a"),
+                         "processing": QtGui.QColor("#ffb02e")}.get(status)
+            if dot_color:
+                p = QtGui.QPainter(pm)
+                p.setRenderHint(QtGui.QPainter.Antialiasing)
+                p.setBrush(dot_color)
+                p.setPen(QtGui.QPen(QtGui.QColor(20, 20, 32), 1.5))
+                w, h = pm.width(), pm.height()
+                cx = w * 0.75
+                cy = h * 0.75
+                r = min(w, h) * 0.10
+                p.drawEllipse(QtCore.QPointF(cx, cy), r, r)
+                p.end()
+            return QtGui.QIcon(pm)
+
     accent = {"recording": QtGui.QColor("#ff5c6a"),
               "processing": QtGui.QColor("#ffb02e")}.get(
         status, QtGui.QColor(126, 132, 170))

@@ -47,32 +47,17 @@ def setup_ollama():
 def save_ico_file():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     ico_path = os.path.join(script_dir, "localflow.ico")
-    if os.path.exists(ico_path):
-        return ico_path
-        
-    print("\n[Setup] Generating application icon (localflow.ico)...")
+    png_path = os.path.join(script_dir, "docs", "aurora_mono_brushed_icon.png")
+    
+    print(f"\n[Setup] Converting {png_path} to localflow.ico...")
     try:
-        from PySide6 import QtCore, QtGui, QtWidgets
+        from PySide6 import QtGui, QtWidgets
         # Create a dummy app to initialize Qt GUI subsystem safely
         _qapp = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         
-        pm = QtGui.QPixmap(64, 64)
-        pm.fill(QtCore.Qt.transparent)
-        p = QtGui.QPainter(pm)
-        p.setRenderHint(QtGui.QPainter.Antialiasing)
-        p.setBrush(QtGui.QColor(20, 20, 32))
-        p.setPen(QtGui.QPen(QtGui.QColor(48, 48, 74), 2))
-        p.drawRoundedRect(5, 5, 54, 54, 16, 16)
-        p.setBrush(QtGui.QColor(126, 132, 170))
-        p.setPen(QtCore.Qt.NoPen)
-        p.drawRoundedRect(26, 13, 12, 24, 6, 6)
-        pen = QtGui.QPen(QtGui.QColor(126, 132, 170), 3)
-        pen.setCapStyle(QtCore.Qt.RoundCap)
-        p.setPen(pen)
-        p.drawArc(20, 22, 24, 22, 180 * 16, 180 * 16)
-        p.drawLine(32, 44, 32, 50)
-        p.drawLine(25, 51, 39, 51)
-        p.end()
+        pm = QtGui.QPixmap(png_path)
+        if pm.isNull():
+            raise ValueError(f"Could not load PNG image: {png_path}")
         pm.save(ico_path, "ICO")
         print(f"[Setup] Generated icon file successfully at:\n  {ico_path}")
     except Exception as e:
