@@ -4,3 +4,4 @@ localflow.log
 stdout.txt
 stderr.txt
 .claude/
+docs/*handoff*.md
