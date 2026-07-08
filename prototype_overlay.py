@@ -28,9 +28,7 @@ RAW = ("so i was thinking we could test claude code with ollama today um and "
 CLEAN = ("So I was thinking we could test Claude Code with Ollama today, and "
          "maybe see how the new overlay looks.")
 
-SHOTS_DIR = (r"C:\Users\YASHPA~1\AppData\Local\Temp\claude"
-             r"\C--Users-YASH-PANCHAL-localflow"
-             r"\dd9a396f-0739-4ce1-81c4-9a7ef15d6b0f\scratchpad\proto_shots")
+SHOTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scratchpad", "proto_shots")
 
 
 def mono_font(pt, weight=QtGui.QFont.Normal):
@@ -74,6 +72,87 @@ def fake_level(t):
     pause = 0.15 if math.sin(t * 0.8) < -0.55 else 1.0
     return min(1.0, (0.10 + 0.75 * syll) * pause
                + random.uniform(0.0, 0.06))
+
+
+def draw_keycap_hint(p, rect, f_kbd, keys, text_color, dim_color):
+    """
+    Draw keybind hint with keyboard button-style representation.
+    """
+    fm = QtGui.QFontMetrics(f_kbd)
+    sep_char = "+"
+    sep_w = fm.horizontalAdvance(sep_char)
+    gap = 4
+    
+    key_widths = []
+    for key in keys:
+        kw = max(fm.horizontalAdvance(key) + 12, 18)
+        key_widths.append(kw)
+        
+    total_w = sum(key_widths) + (len(keys) - 1) * (sep_w + gap * 2)
+    
+    # Calculate starting point for right alignment
+    x0 = rect.right() - total_w
+    key_h = 16
+    y0 = rect.top() + (rect.height() - key_h) / 2.0
+    
+    p.save()
+    p.setFont(f_kbd)
+    
+    cx = x0
+    cy = y0
+    
+    # Check if light or dark theme based on text color lightness
+    is_dark_bg = text_color.lightnessF() > 0.5
+    
+    if is_dark_bg:
+        # Dark theme key styling
+        bg_grad_top = QtGui.QColor(48, 48, 56)
+        bg_grad_bot = QtGui.QColor(32, 32, 38)
+        depth_color = QtGui.QColor(14, 14, 18)
+        border_color = QtGui.QColor(76, 76, 92, 160)
+        text_pen = text_color
+    else:
+        # Light theme key styling
+        bg_grad_top = QtGui.QColor(252, 252, 254)
+        bg_grad_bot = QtGui.QColor(226, 226, 232)
+        depth_color = QtGui.QColor(172, 172, 180)
+        border_color = QtGui.QColor(188, 188, 198)
+        text_pen = text_color
+        
+    for i, key in enumerate(keys):
+        kw = key_widths[i]
+        
+        # 1. 3D shadow/depth
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(depth_color)
+        p.drawRoundedRect(QtCore.QRectF(cx, cy + 1, kw, key_h), 3.0, 3.0)
+        
+        # 2. Keycap body
+        body_grad = QtGui.QLinearGradient(cx, cy, cx, cy + key_h - 1)
+        body_grad.setColorAt(0, bg_grad_top)
+        body_grad.setColorAt(1, bg_grad_bot)
+        p.setBrush(body_grad)
+        p.drawRoundedRect(QtCore.QRectF(cx, cy, kw, key_h - 1), 3.0, 3.0)
+        
+        # 3. Border
+        p.setPen(QtGui.QPen(border_color, 1))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawRoundedRect(QtCore.QRectF(cx + 0.5, cy + 0.5, kw - 1, key_h - 2), 2.5, 2.5)
+        
+        # 4. Text
+        p.setPen(text_pen)
+        # Shift text up slightly so it centers visually with the bottom shadow lip
+        p.drawText(QtCore.QRectF(cx, cy - 0.5, kw, key_h - 1), QtCore.Qt.AlignCenter, key)
+        
+        cx += kw
+        
+        if i < len(keys) - 1:
+            cx += gap
+            p.setPen(dim_color)
+            p.drawText(QtCore.QRectF(cx, cy - 0.5, sep_w, key_h - 1), QtCore.Qt.AlignCenter, sep_char)
+            cx += sep_w + gap
+            
+    p.restore()
 
 
 # =============================================================================
@@ -187,6 +266,7 @@ class AuroraGlass(BaseVariant):
         self._lines = []
         self.f_title = QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold)
         self.f_hint = QtGui.QFont("Segoe UI", 7)
+        self.f_kbd = QtGui.QFont("Segoe UI", 7, QtGui.QFont.Bold)
         self.f_prev = QtGui.QFont("Segoe UI", 9)
 
     def _tick_visuals(self):
@@ -281,11 +361,8 @@ class AuroraGlass(BaseVariant):
         p.drawText(QtCore.QRectF(tx, py, 170, self.BASE_H),
                    QtCore.Qt.AlignVCenter, self.TITLE.get(state, ""))
 
-        p.setFont(self.f_hint)
-        p.setPen(QtGui.QColor(140, 140, 162))
-        p.drawText(QtCore.QRectF(px, py, self.PILL_W - 18, self.BASE_H),
-                   QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
-                   "Ctrl · Alt · /")
+        target_rect = QtCore.QRectF(px, py, self.PILL_W - 18, self.BASE_H)
+        draw_keycap_hint(p, target_rect, self.f_kbd, ["Ctrl", "Alt", "/"], QtGui.QColor(244, 244, 250), QtGui.QColor(140, 140, 162))
 
         if self._lines:
             p.setFont(self.f_prev)
@@ -317,6 +394,7 @@ class RibbonHUD(BaseVariant):
         self.f_title.setLetterSpacing(QtGui.QFont.AbsoluteSpacing, 2.0)
         self.f_text = QtGui.QFont("Segoe UI", 10)
         self.f_hint = QtGui.QFont("Segoe UI", 7)
+        self.f_kbd = QtGui.QFont("Segoe UI", 7, QtGui.QFont.Bold)
 
     def _tick_visuals(self):
         self._hist.append(self._lvl + random.uniform(-0.04, 0.04))
@@ -391,11 +469,8 @@ class RibbonHUD(BaseVariant):
             p.drawText(QtCore.QRectF(280, 0, avail, h), flags, txt)
 
         # right: hint
-        p.setFont(self.f_hint)
-        p.setPen(QtGui.QColor(120, 150, 160))
-        p.drawText(QtCore.QRectF(0, 0, w - 24, h),
-                   QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
-                   "CTRL · ALT · /")
+        target_rect = QtCore.QRectF(0, 0, w - 24, h)
+        draw_keycap_hint(p, target_rect, self.f_kbd, ["Ctrl", "Alt", "/"], QtGui.QColor(238, 248, 252), QtGui.QColor(120, 150, 160))
         p.end()
 
 
@@ -418,6 +493,7 @@ class OrbIsland(BaseVariant):
         self.f_title = QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold)
         self.f_prev = QtGui.QFont("Segoe UI", 9)
         self.f_hint = QtGui.QFont("Segoe UI", 7)
+        self.f_kbd = QtGui.QFont("Segoe UI", 7, QtGui.QFont.Bold)
 
     def _tick_visuals(self):
         self._lines = wrap_tail(self.preview, self.f_prev, 430 - 52, 2)
@@ -481,10 +557,23 @@ class OrbIsland(BaseVariant):
 
         if self._lines:
             m, s = divmod(int(self.elapsed()), 60)
+            
+            # Calculate dynamic keycap width for positioning
+            fm_kbd = QtGui.QFontMetrics(self.f_kbd)
+            total_w = (max(fm_kbd.horizontalAdvance("Ctrl") + 12, 18) +
+                       max(fm_kbd.horizontalAdvance("Alt") + 12, 18) +
+                       max(fm_kbd.horizontalAdvance("/") + 12, 18) +
+                       2 * (fm_kbd.horizontalAdvance("+") + 8)) # gap=4 -> gap * 2 = 8
+            
             p.setFont(self.f_hint)
             p.setPen(QtGui.QColor(150, 150, 160))
-            p.drawText(QtCore.QRectF(px, py + 6, cw - 18, 30),
-                       QtCore.Qt.AlignRight, f"{m}:{s:02d}   Ctrl·Alt·/")
+            # Draw timer text shifted left of the keycap hint dynamically
+            p.drawText(QtCore.QRectF(px, py + 6, cw - 18 - total_w - 6, 30),
+                       QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter, f"{m}:{s:02d}")
+            
+            # Draw keycap hint right-aligned
+            target_rect = QtCore.QRectF(px, py + 6, cw - 18, 30)
+            draw_keycap_hint(p, target_rect, self.f_kbd, ["Ctrl", "Alt", "/"], QtGui.QColor(80, 80, 90), QtGui.QColor(150, 150, 160))
             p.setFont(self.f_prev)
             for i, ln in enumerate(self._lines):
                 dim = i == 0 and len(self._lines) > 1

@@ -1,4 +1,4 @@
-﻿"""
+"""
 LocalFlow — a local Wispr Flow clone.
 
 Press Ctrl+Alt+/ to start recording, press it again to stop.
@@ -92,8 +92,12 @@ Rules:
 becomes "send it Tuesday".
 - Keep the speaker's words and meaning. Do NOT summarize, expand, answer \
 questions, or add anything.
-- Keep everything in ONE paragraph with the same sentence structure. Do not \
-reformat into lists or separate lines. Every sentence ends with punctuation.
+- If the speaker is clearly enumerating items — using cues like "first,
+second, third", "one, two, three", "also", or a run of short items named
+back-to-back with no connecting sentence — format those items as a markdown
+list (one "- " item per line). Otherwise keep everything in ONE paragraph
+with the same sentence structure; do not invent a list where the speaker was
+just talking normally. Every sentence/item ends with punctuation.
 - Output ONLY the cleaned text. No quotes, no preamble, no explanations."""
 
 # ----------------------------------------------------------------------------
@@ -168,6 +172,7 @@ SOUNDS = {
     "stop": _chime([880, 587], dur=0.08),              # quick falling blip
     "done": _chime([1047], dur=0.06, vol=0.22),        # tiny tick
     "error": _chime([233, 220], dur=0.16, vol=0.3),    # low buzz
+    "cancel": _chime([330, 262], dur=0.10, gap=0.015, vol=0.25),
 }
 
 def play(name):
@@ -255,6 +260,87 @@ def EASE_TEXT(p):                                    # transcript fade-in
     return _EASE_CUBIC.valueForProgress(0.0 if p < 0.0 else 1.0 if p > 1.0 else p)
 
 
+def draw_keycap_hint(p, rect, f_kbd, keys, text_color, dim_color):
+    """
+    Draw keybind hint with keyboard button-style representation.
+    """
+    fm = QtGui.QFontMetrics(f_kbd)
+    sep_char = "+"
+    sep_w = fm.horizontalAdvance(sep_char)
+    gap = 4
+    
+    key_widths = []
+    for key in keys:
+        kw = max(fm.horizontalAdvance(key) + 12, 18)
+        key_widths.append(kw)
+        
+    total_w = sum(key_widths) + (len(keys) - 1) * (sep_w + gap * 2)
+    
+    # Calculate starting point for right alignment
+    x0 = rect.right() - total_w
+    key_h = 16
+    y0 = rect.top() + (rect.height() - key_h) / 2.0
+    
+    p.save()
+    p.setFont(f_kbd)
+    
+    cx = x0
+    cy = y0
+    
+    # Check if light or dark theme based on text color lightness
+    is_dark_bg = text_color.lightnessF() > 0.5
+    
+    if is_dark_bg:
+        # Dark theme key styling
+        bg_grad_top = QtGui.QColor(48, 48, 56)
+        bg_grad_bot = QtGui.QColor(32, 32, 38)
+        depth_color = QtGui.QColor(14, 14, 18)
+        border_color = QtGui.QColor(76, 76, 92, 160)
+        text_pen = text_color
+    else:
+        # Light theme key styling
+        bg_grad_top = QtGui.QColor(252, 252, 254)
+        bg_grad_bot = QtGui.QColor(226, 226, 232)
+        depth_color = QtGui.QColor(172, 172, 180)
+        border_color = QtGui.QColor(188, 188, 198)
+        text_pen = text_color
+        
+    for i, key in enumerate(keys):
+        kw = key_widths[i]
+        
+        # 1. 3D shadow/depth
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(depth_color)
+        p.drawRoundedRect(QtCore.QRectF(cx, cy + 1, kw, key_h), 3.0, 3.0)
+        
+        # 2. Keycap body
+        body_grad = QtGui.QLinearGradient(cx, cy, cx, cy + key_h - 1)
+        body_grad.setColorAt(0, bg_grad_top)
+        body_grad.setColorAt(1, bg_grad_bot)
+        p.setBrush(body_grad)
+        p.drawRoundedRect(QtCore.QRectF(cx, cy, kw, key_h - 1), 3.0, 3.0)
+        
+        # 3. Border
+        p.setPen(QtGui.QPen(border_color, 1))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawRoundedRect(QtCore.QRectF(cx + 0.5, cy + 0.5, kw - 1, key_h - 2), 2.5, 2.5)
+        
+        # 4. Text
+        p.setPen(text_pen)
+        # Shift text up slightly so it centers visually with the bottom shadow lip
+        p.drawText(QtCore.QRectF(cx, cy - 0.5, kw, key_h - 1), QtCore.Qt.AlignCenter, key)
+        
+        cx += kw
+        
+        if i < len(keys) - 1:
+            cx += gap
+            p.setPen(dim_color)
+            p.drawText(QtCore.QRectF(cx, cy - 0.5, sep_w, key_h - 1), QtCore.Qt.AlignCenter, sep_char)
+            cx += sep_w + gap
+            
+    p.restore()
+
+
 # ----------------------------------------------------------------------------
 # Overlay (Qt): frameless translucent pill, bottom-center, always on top.
 # Voice bars react to the real microphone level; smooth fades; live
@@ -320,6 +406,7 @@ class Overlay(QtWidgets.QWidget):
 
         self.f_title = QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold)
         self.f_hint = QtGui.QFont("Segoe UI", 7)
+        self.f_kbd = QtGui.QFont("Segoe UI", 7, QtGui.QFont.Bold)
         self.f_prev = QtGui.QFont("Segoe UI", 9)
 
         self.setWindowOpacity(0.0)
@@ -329,6 +416,20 @@ class Overlay(QtWidgets.QWidget):
 
     # -- animation loop --------------------------------------------------------
     def _animate(self):
+        if getattr(self, "instant_hide", False):
+            self.instant_hide = False
+            self.state = "idle"
+            self._opacity = 0.0
+            self._op_frm = self._op_to = 0.0
+            self.setWindowOpacity(0.0)
+            if self.isVisible():
+                self.hide()
+            self.preview = ""
+            self._lines = []
+            self._prev_nlines = 0
+            self._h = self._h_frm = self._h_to = float(self.BASE_H)
+            return
+
         now = time.perf_counter()
         self._tick += 1
         state = self.state
@@ -488,11 +589,8 @@ class Overlay(QtWidgets.QWidget):
                    QtCore.Qt.AlignVCenter, self.TITLE.get(state, ""))
 
         # hotkey hint, right-aligned inside the pill
-        p.setFont(self.f_hint)
-        p.setPen(self.DIM)
-        p.drawText(QtCore.QRectF(px, py, self.PILL_W - 18, self.BASE_H),
-                   QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
-                   "Ctrl · Alt · /")
+        target_rect = QtCore.QRectF(px, py, self.PILL_W - 18, self.BASE_H)
+        draw_keycap_hint(p, target_rect, self.f_kbd, ["Ctrl", "Alt", "/"], self.TEXT, self.DIM)
 
         # live transcript preview (older line dimmed, newest bright and fading
         # in via _paint_bottom_alpha so a fresh line doesn't pop)
@@ -761,6 +859,18 @@ class App:
                 self._stop_recording()
                 threading.Thread(target=self._process, daemon=True).start()
 
+    def cancel(self):
+        with self.lock:
+            if not self.recording:
+                return
+            self._stop_recording(play_chime=False)
+            self.frames = []
+            if self.overlay:
+                self.overlay.instant_hide = True
+            self._set_status("idle")
+            play("cancel")
+            log("Recording cancelled by user.")
+
     def _audio_cb(self, data, *_):
         self.frames.append(data.copy())
         if self.overlay is not None:
@@ -822,15 +932,17 @@ class App:
                 self._stop_recording()
                 threading.Thread(target=self._process, daemon=True).start()
 
-    def _stop_recording(self):
+    def _stop_recording(self, play_chime=True):
         self.recording = False
         try:
-            self.stream.stop()
-            self.stream.close()
+            if self.stream:
+                self.stream.stop()
+                self.stream.close()
         except Exception as e:
             log(f"Error closing mic stream: {e}")
         self.stream = None
-        play("stop")
+        if play_chime:
+            play("stop")
 
     # -- Pipeline -------------------------------------------------------------
     def _process(self):
@@ -937,11 +1049,44 @@ def hotkey_thread(app):
         play("error")
         return
     log("Hotkey Ctrl+Alt+/ registered (Win32).")
+
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+
     msg = wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
         if msg.message == 0x0312:  # WM_HOTKEY
-            log("Hotkey pressed.")
-            app.toggle()
+            if app.recording:
+                log("Hotkey pressed while recording. Checking for long-press...")
+                # Poll to see if keys are held for 600ms
+                is_long_press = True
+                poll_interval = 0.015  # 15ms
+                steps = int(0.600 / poll_interval)
+                
+                for _ in range(steps):
+                    time.sleep(poll_interval)
+                    ctrl_down = (user32.GetAsyncKeyState(0x11) & 0x8000) != 0
+                    alt_down = (user32.GetAsyncKeyState(0x12) & 0x8000) != 0
+                    key_down = (user32.GetAsyncKeyState(0xBF) & 0x8000) != 0
+                    
+                    if not (ctrl_down and alt_down and key_down):
+                        is_long_press = False
+                        break
+                
+                if is_long_press:
+                    log("Long-press detected. Cancelling recording.")
+                    app.cancel()
+                    # Wait for user to release all keys before continuing
+                    while (user32.GetAsyncKeyState(0x11) & 0x8000) or \
+                          (user32.GetAsyncKeyState(0x12) & 0x8000) or \
+                          (user32.GetAsyncKeyState(0xBF) & 0x8000):
+                        time.sleep(0.05)
+                else:
+                    log("Short-press detected. Stopping recording.")
+                    app.toggle()
+            else:
+                log("Hotkey pressed. Starting recording.")
+                app.toggle()
 
 
 def main():
