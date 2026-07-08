@@ -47,7 +47,7 @@ def setup_ollama():
 def save_ico_file():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     ico_path = os.path.join(script_dir, "localflow.ico")
-    png_path = os.path.join(script_dir, "docs", "aurora_mono_brushed_icon.png")
+    png_path = os.path.join(script_dir, "docs", "fluid_soundwave_icon.png")
     
     print(f"\n[Setup] Converting {png_path} to localflow.ico...")
     try:
