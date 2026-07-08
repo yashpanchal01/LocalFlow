@@ -1,0 +1,14 @@
+# LocalFlow dictionary — one word or name per line.
+# Whisper is biased toward these. Lines starting with '#' are ignored.
+# Edits take effect on your next dictation.
+
+Claude Code
+Claude
+Ollama
+Whisper
+LocalFlow
+GitHub
+Python
+VS Code
+API
+Anthropic

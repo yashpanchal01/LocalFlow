@@ -47,3 +47,71 @@
 [19:04:22] Hotkey Ctrl+Alt+/ registered (Win32).
 [19:04:46] Ollama model 'qwen2.5:3b' warm.
 [19:53:33] Quitting.
+[21:05:17] Ollama cleanup failed (Expecting property name enclosed in double quotes: line 1 column 2 (char 1)); pasting raw transcript.
+[21:29:38] Loading whisper model 'distil-large-v3'...
+[21:30:15] Whisper ready (GPU, int8_float16).
+[21:30:16] LocalFlow ready. Press Ctrl+Alt+/ to dictate.
+[21:30:16] Hotkey Ctrl+Alt+/ registered (Win32).
+[21:30:19] Ollama model 'qwen2.5:3b' warm.
+[21:31:15] Hotkey pressed.
+[21:31:16] Recording... (Ctrl+Alt+/ to stop)
+[21:31:40] Hotkey pressed.
+[21:31:41] Processing 24.2s of audio...
+[21:31:41] Transcript (0.84s): Can you actually listen to me and write everything accurately? And are you able to remove all the, I don't know, like the filler words?
+[21:31:42] Cleaned    (1.01s): Can you actually listen to me and write everything accurately? Remove all, I don't know, like the filler words.
+[21:31:42] Done in 1.94s total.
+[21:31:57] Hotkey pressed.
+[21:31:57] Recording... (Ctrl+Alt+/ to stop)
+[21:32:09] Hotkey pressed.
+[21:32:09] Processing 11.6s of audio...
+[21:32:10] Transcript (0.71s): You don't seem to be accurate because you are changing words that changed the context.
+[21:32:12] Cleaned    (2.81s): You don't seem to be accurate because you are changing words that altered the context.
+[21:32:13] Done in 3.59s total.
+[21:32:21] Hotkey pressed.
+[21:32:22] Recording... (Ctrl+Alt+/ to stop)
+[21:32:38] Hotkey pressed.
+[21:32:38] Processing 16.2s of audio...
+[21:32:39] Transcript (1.04s): But you are not that bad and can you write Claudecote? Do you know what Google is? Do you know what chat GPD 5.5 model is?
+[21:32:43] Cleaned    (3.39s): You are not that bad and can write Claudecote? Do you know what Google is? Do you know what Chat GPT 5.5 model is?
+[21:32:43] Done in 4.50s total.
+[21:33:00] Hotkey pressed.
+[21:33:01] Recording... (Ctrl+Alt+/ to stop)
+[21:33:06] Hotkey pressed.
+[21:33:06] Processing 5.0s of audio...
+[21:33:07] Transcript (0.55s): Lord Go.
+[21:33:07] Cleaned    (0.00s): Lord Go.
+[21:33:07] Done in 0.62s total.
+[21:33:13] Hotkey pressed.
+[21:33:13] Recording... (Ctrl+Alt+/ to stop)
+[21:33:16] Processing 3.1s of audio...
+[21:33:17] Transcript (0.54s): Lord.
+[21:33:17] Cleaned    (0.00s): Lord.
+[21:33:17] Done in 0.60s total.
+[21:33:18] Hotkey pressed.
+[21:33:18] Recording... (Ctrl+Alt+/ to stop)
+[21:33:26] Hotkey pressed.
+[21:33:26] Processing 7.5s of audio...
+[21:33:27] Transcript (0.84s): Right claw code.
+[21:33:27] Cleaned    (0.01s): Right claw code.
+[21:33:27] Done in 0.90s total.
+[21:34:37] Hotkey pressed.
+[21:34:37] Recording... (Ctrl+Alt+/ to stop)
+[21:34:53] Hotkey pressed.
+[21:34:53] Processing 15.5s of audio...
+[21:34:54] Transcript (1.07s): So I was thinking we could taste broadcourt with Lama today.
+[21:34:57] Cleaned    (2.74s): So I was thinking we could taste BroadCourt with Lama today.
+[21:34:57] Done in 3.88s total.
+[21:58:26] Hotkey pressed.
+[21:58:28] Recording... (Ctrl+Alt+/ to stop)
+[21:59:09] Hotkey pressed.
+[21:59:09] Processing 41.3s of audio...
+[21:59:10] Transcript (0.96s): No it's fine we can go to the path B at the end. Also, now let's focus on the UI. Build me a few prototypes of the UI.
+[21:59:14] Cleaned    (3.91s): It's fine, we can go to the Path B at the end. Also, let's focus on the UI. Build me a few prototypes of the UI.
+[21:59:14] Done in 4.96s total.
+[21:59:34] Hotkey pressed.
+[21:59:34] Recording... (Ctrl+Alt+/ to stop)
+[21:59:44] Hotkey pressed.
+[21:59:44] Processing 9.8s of audio...
+[21:59:45] Transcript (0.75s): with different themes slash prototype.
+[21:59:48] Cleaned    (2.65s): With different themes / prototype.
+[21:59:48] Done in 3.47s total.

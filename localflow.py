@@ -10,6 +10,7 @@ Everything runs on-device. No cloud, no subscription.
 
 import ctypes
 import io
+import json
 import math
 import os
 import random
@@ -31,6 +32,10 @@ HOTKEY_VK = 0xBF                          # VK_OEM_2, the / ? key
 HOTKEY_NAME = "Ctrl+Alt+/"
 
 WHISPER_MODEL = "distil-large-v3"   # accuracy; small.en if VRAM gets tight
+# TODO: upgrade to "distil-whisper/distil-large-v3.5-ct2" (lower WER, same VRAM)
+# once the Windows HF-cache symlink issue is resolved: first download hits
+# WinError 1314 (needs Developer Mode / admin, or HF_HUB_DISABLE_SYMLINKS).
+# See docs/research/improving-localflow.md §2a.
 WHISPER_COMPUTE = "int8_float16"    # quantized on GPU = fits next to the LLM
 OLLAMA_MODEL = "qwen2.5:3b"     # small enough to always fit next to whisper
 OLLAMA_URL = "http://localhost:11434"
@@ -40,7 +45,8 @@ OLLAMA_TIMEOUT = 30             # give up and paste raw transcript after this
 MAX_RECORD_SECONDS = 120        # safety cutoff
 LIVE_PREVIEW_EVERY = 2.0        # seconds between live-transcription passes
 
-# Words/names whisper should recognize. Add your own jargon here.
+# Seed word list. On first run this is written to dictionary.txt, which you
+# then edit; the file wins after that. Whisper is biased toward these words.
 DICTIONARY = ["Claude Code", "Claude", "Ollama", "Whisper", "LocalFlow",
               "GitHub", "Python", "VS Code", "API", "Anthropic"]
 
@@ -56,6 +62,7 @@ SAMPLE_RATE = 16000             # whisper's native rate
 SINGLE_INSTANCE_PORT = 52739    # refuses to start twice
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(APP_DIR, "localflow.log")
+DICT_FILE = os.path.join(APP_DIR, "dictionary.txt")  # user-editable word list
 
 CLEANUP_PROMPT = """You clean up raw speech-to-text transcripts for dictation.
 
@@ -169,6 +176,31 @@ def quick_clean(text):
     text = re.sub(r"\b(um+|uh+|erm+)\b[,.]?\s*", "", text, flags=re.I)
     text = re.sub(r"\s{2,}", " ", text).strip()
     return text
+
+
+def load_dictionary():
+    """Return the dictionary word list, read fresh from dictionary.txt so edits
+    apply on the next dictation. Seeds the file from the built-in DICTIONARY on
+    first run; falls back to the built-in list if the file can't be read."""
+    try:
+        if not os.path.exists(DICT_FILE):
+            with open(DICT_FILE, "w", encoding="utf-8") as f:
+                f.write("# LocalFlow dictionary — one word or name per line.\n")
+                f.write("# Whisper is biased toward these. Lines starting with "
+                        "'#' are ignored.\n")
+                f.write("# Edits take effect on your next dictation.\n\n")
+                for w in DICTIONARY:
+                    f.write(w + "\n")
+        terms = []
+        with open(DICT_FILE, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    terms.append(line)
+        return terms or DICTIONARY
+    except OSError as e:
+        log(f"Could not read dictionary.txt ({e}); using built-in list.")
+        return DICTIONARY
 
 
 # ----------------------------------------------------------------------------
@@ -367,6 +399,114 @@ def _tray_icon(status="idle"):
 
 
 # ----------------------------------------------------------------------------
+# Win32 paste helpers: wait for the user to release the hotkey modifiers before
+# synthesizing Ctrl+V, and detect when the target window is higher integrity
+# than us (UIPI silently blocks injected input into elevated windows). Both are
+# defensive — any failure degrades to "proceed with a normal paste".
+# ----------------------------------------------------------------------------
+_MOD_VKS = (0x11, 0x12, 0x10, 0x5B, 0x5C)   # CTRL, ALT, SHIFT, LWIN, RWIN
+
+def wait_modifiers_released(timeout=1.0):
+    """Block until the hotkey's Ctrl/Alt (etc.) are physically up, so a still-
+    held modifier can't corrupt the synthesized Ctrl+V."""
+    user32 = ctypes.windll.user32
+    t0 = time.perf_counter()
+    while time.perf_counter() - t0 < timeout:
+        if not any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in _MOD_VKS):
+            return
+        time.sleep(0.01)
+
+
+def _process_integrity(pid):
+    """Integrity-level RID of a process (pid=None means the current process).
+    Returns an int RID (medium=0x2000, high=0x3000, …) or None if it can't be
+    determined."""
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    a32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    a32.OpenProcessToken.restype = wintypes.BOOL
+    a32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                     ctypes.POINTER(wintypes.HANDLE)]
+    a32.GetTokenInformation.restype = wintypes.BOOL
+    a32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                        ctypes.c_void_p, wintypes.DWORD,
+                                        ctypes.POINTER(wintypes.DWORD)]
+    a32.GetSidSubAuthorityCount.restype = ctypes.POINTER(ctypes.c_ubyte)
+    a32.GetSidSubAuthorityCount.argtypes = [ctypes.c_void_p]
+    a32.GetSidSubAuthority.restype = ctypes.POINTER(wintypes.DWORD)
+    a32.GetSidSubAuthority.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    TOKEN_QUERY = 0x0008
+    TokenIntegrityLevel = 25
+
+    if pid is None:
+        hproc, close = k32.GetCurrentProcess(), False
+    else:
+        hproc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        close = True
+        if not hproc:
+            return None
+    try:
+        tok = wintypes.HANDLE()
+        if not a32.OpenProcessToken(hproc, TOKEN_QUERY, ctypes.byref(tok)):
+            return None
+        try:
+            size = wintypes.DWORD()
+            a32.GetTokenInformation(tok, TokenIntegrityLevel, None, 0,
+                                    ctypes.byref(size))
+            if not size.value:
+                return None
+            buf = ctypes.create_string_buffer(size.value)
+            if not a32.GetTokenInformation(tok, TokenIntegrityLevel, buf, size,
+                                           ctypes.byref(size)):
+                return None
+            sid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            count = a32.GetSidSubAuthorityCount(sid)[0]
+            return int(a32.GetSidSubAuthority(sid, count - 1)[0])
+        finally:
+            k32.CloseHandle(tok)
+    finally:
+        if close:
+            k32.CloseHandle(hproc)
+
+
+def foreground_is_elevated():
+    """True only when we can positively confirm the foreground window runs at a
+    higher integrity level than us — so a false reading never blocks a normal
+    paste. Any error is swallowed as 'not elevated'."""
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        target = _process_integrity(pid.value)
+        mine = _process_integrity(None)
+        if target is None or mine is None:
+            return False          # can't tell → behave as before, try to paste
+        return target > mine
+    except Exception as e:
+        log(f"Elevation check failed ({type(e).__name__}); assuming normal.")
+        return False
+
+
+class Notifier(QtCore.QObject):
+    """Marshals cross-thread user notifications onto the GUI thread."""
+    message = QtCore.Signal(str, str)   # title, body
+
+
+# ----------------------------------------------------------------------------
 # App
 # ----------------------------------------------------------------------------
 class App:
@@ -379,7 +519,9 @@ class App:
         self.whisper_lock = threading.Lock()  # one transcription at a time
         self.tray = None
         self.overlay = overlay
-        self.hotwords = " ".join(DICTIONARY)
+        self.notifier = Notifier()
+        self.hotwords = ""
+        self._reload_hotwords()
 
         log(f"Loading whisper model '{WHISPER_MODEL}'...")
         try:
@@ -395,6 +537,10 @@ class App:
             log("Whisper ready (CPU, small.en).")
 
         threading.Thread(target=self._warm_ollama, daemon=True).start()
+
+    def _reload_hotwords(self):
+        """Re-read the user dictionary so edits apply without a restart."""
+        self.hotwords = " ".join(load_dictionary())
 
     # -- Ollama ---------------------------------------------------------------
     def _warm_ollama(self):
@@ -423,7 +569,8 @@ class App:
         if len(text.split()) <= 3:      # too short to bother the LLM
             return quick_clean(text)
         try:
-            r = OLLAMA_SESSION.post(
+            parts = []
+            with OLLAMA_SESSION.post(
                 f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": OLLAMA_MODEL,
@@ -431,20 +578,33 @@ class App:
                         {"role": "system", "content": CLEANUP_PROMPT},
                         {"role": "user", "content": text},
                     ],
-                    "stream": False,
+                    "stream": True,
                     "keep_alive": OLLAMA_KEEP_ALIVE,
                     "options": {"temperature": 0.1,
                                 "num_ctx": OLLAMA_NUM_CTX},
                 },
                 timeout=OLLAMA_TIMEOUT,
-            )
-            r.raise_for_status()
-            cleaned = r.json()["message"]["content"].strip()
+                stream=True,
+            ) as r:
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        parts.append(piece)
+                        # show the text polishing live in the overlay preview
+                        if self.overlay is not None:
+                            self.overlay.preview = fix_terms("".join(parts))
+                    if chunk.get("done"):
+                        break
+            cleaned = "".join(parts).strip()
             # guard against a model that ignored instructions and went rogue
             if cleaned and len(cleaned) < len(text) * 3 + 80:
                 return cleaned
             return quick_clean(text)
-        except (requests.RequestException, KeyError) as e:
+        except (requests.RequestException, ValueError, KeyError) as e:
             log(f"Ollama cleanup failed ({e}); pasting raw transcript.")
             return quick_clean(text)
 
@@ -468,6 +628,7 @@ class App:
             self.overlay.level = min(1.0, rms * 14)
 
     def _start_recording(self):
+        self._reload_hotwords()   # pick up dictionary.txt edits per dictation
         try:
             self.frames = []
             self.stream = sd.InputStream(
@@ -505,7 +666,8 @@ class App:
                     segments, _ = self.whisper.transcribe(
                         audio, beam_size=1, vad_filter=True,
                         condition_on_previous_text=False,
-                        hotwords=self.hotwords)
+                        hotwords=self.hotwords,
+                        initial_prompt=self.hotwords)
                     text = " ".join(s.text.strip() for s in segments).strip()
                 if text and self.overlay and self.recording:
                     self.overlay.preview = fix_terms(text)
@@ -545,8 +707,9 @@ class App:
             t0 = time.perf_counter()
             with self.whisper_lock:
                 segments, _info = self.whisper.transcribe(
-                    audio, beam_size=1, vad_filter=True,
-                    hotwords=self.hotwords)
+                    audio, beam_size=5, vad_filter=True,
+                    hotwords=self.hotwords,
+                    initial_prompt=self.hotwords)
                 raw = " ".join(s.text.strip() for s in segments).strip()
             t1 = time.perf_counter()
             if not raw:
@@ -569,19 +732,46 @@ class App:
             self._set_status("idle")
 
     def _paste(self, text):
+        if foreground_is_elevated():
+            # UIPI silently swallows an injected Ctrl+V into an elevated window.
+            # Leave the text on the clipboard and tell the user, rather than
+            # failing invisibly.
+            try:
+                pyperclip.copy(text)
+            except pyperclip.PyperclipException:
+                pass
+            self.notifier.message.emit(
+                "LocalFlow — can't paste here",
+                "This window is running as administrator. Your text is on the "
+                "clipboard (press Ctrl+V), or run LocalFlow as admin.")
+            play("error")
+            log("Foreground window is elevated; left text on clipboard.")
+            return
+
         old_clip = None
         try:
             old_clip = pyperclip.paste()
         except pyperclip.PyperclipException:
             pass
         pyperclip.copy(text)
+        wait_modifiers_released()   # a still-held Ctrl/Alt would corrupt Ctrl+V
         time.sleep(0.05)
         kb = keyboard.Controller()
         with kb.pressed(keyboard.Key.ctrl):
             kb.press("v")
             kb.release("v")
         if old_clip is not None:
-            threading.Timer(1.0, lambda: pyperclip.copy(old_clip)).start()
+            threading.Timer(
+                1.0, lambda: self._restore_clip(text, old_clip)).start()
+
+    def _restore_clip(self, ours, old_clip):
+        """Restore the previous clipboard only if our dictated text is still
+        there — if the user copied something new meanwhile, leave it alone."""
+        try:
+            if pyperclip.paste() == ours:
+                pyperclip.copy(old_clip)
+        except pyperclip.PyperclipException:
+            pass
 
     # -- Status (tray + overlay) ----------------------------------------------
     def _set_status(self, status):
@@ -643,6 +833,9 @@ def main():
     tray.setToolTip("LocalFlow — idle")
     tray.show()
     app.tray = tray
+    app.notifier.message.connect(
+        lambda title, body: tray.showMessage(
+            title, body, QtWidgets.QSystemTrayIcon.MessageIcon.Warning, 6000))
 
     sys.exit(qapp.exec())
 
