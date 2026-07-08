@@ -1,0 +1,31 @@
+[18:53:03] Loading whisper model 'distil-large-v3'...
+[18:53:36] Whisper ready (GPU, int8_float16).
+[18:53:36] LocalFlow ready. Press Ctrl+Alt+/ to dictate.
+[18:53:36] Hotkey Ctrl+Alt+/ registered (Win32).
+[18:53:40] Ollama model 'qwen2.5:3b' warm.
+[18:54:44] Hotkey pressed.
+[18:54:44] Recording... (Ctrl+Alt+/ to stop)
+[18:55:40] Hotkey pressed.
+[18:55:40] Processing 53.7s of audio...
+[18:55:41] Transcript (0.79s): Pretty. I like intelligent men too, so what's the problem? So intelligent people cannot fall in love. True love needs one idiot. Everything made sense.
+[18:55:42] Hotkey pressed.
+[18:55:42] Hotkey pressed, but still processing — ignored.
+[18:55:42] Cleaned    (1.11s): Pretty, I like intelligent men too, so what’s the problem? Intelligent people cannot fall in love. True love needs one idiot. Everything made sense.
+[18:55:42] Done in 1.97s total.
+[19:00:54] Hotkey pressed.
+[19:00:55] Recording... (Ctrl+Alt+/ to stop)
+[19:01:03] Hotkey pressed.
+[19:01:03] Processing 8.1s of audio...
+[19:01:03] Transcript (0.63s): But really, what's defeating in?
+[19:01:04] Cleaned    (0.99s): but really, what's the deadline in?
+[19:01:05] Done in 1.70s total.
+[19:01:05] Hotkey pressed.
+[19:01:06] Recording... (Ctrl+Alt+/ to stop)
+[19:01:08] Hotkey pressed.
+[19:01:08] Processing 1.9s of audio...
+[19:01:08] Transcript (0.78s): Nothing in my heart.
+[19:01:09] Hotkey pressed.
+[19:01:09] Hotkey pressed, but still processing — ignored.
+[19:01:09] Cleaned    (0.55s): Nothing in my heart.
+[19:01:09] Done in 1.40s total.
+[19:07:40] Quitting.
