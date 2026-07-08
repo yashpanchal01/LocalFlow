@@ -51,10 +51,27 @@ DICTIONARY = ["Claude Code", "Claude", "Ollama", "Whisper", "LocalFlow",
               "GitHub", "Python", "VS Code", "API", "Anthropic"]
 
 # Common mishearings, fixed after transcription (case-insensitive regex).
+# Deliberately narrow: each entry targets an *observed* mishear with an
+# unambiguous shape, so it can't clobber a legitimate word. When in doubt,
+# leave it out — a wrong "correction" is worse than an uncorrected transcript.
 CORRECTIONS = {
-    r"\b(?:blood|cloud|clod|clot|clawed|clogged|clout) ?"
+    # "Claude Code" — two-word mishears: a Claude-ish first token followed by
+    # a code-ish second token. "claw" (as in the observed "claw code") joins
+    # the existing "clawed"/"cloud"/… set.
+    r"\b(?:blood|cloud|clod|clot|claw|clawed|clogged|clout) ?"
     r"(?:cold|code|coat|called|cord)\b": "Claude Code",
+    # "Claude Code" — single-token smears Whisper emits as one word
+    # ("broadcourt", "Claudecote", "Claudecode"). These strings have no
+    # legitimate English meaning, so a bare match is safe.
+    r"\b(?:broadcourt|claudecote|claudecode)\b": "Claude Code",
+    # "Ollama" — the leading vowel Whisper usually hears ("ollama", "o lama",
+    # "oh lama", "ooo lama").
     r"\bo+ ?lama\b": "Ollama",
+    # "Ollama" — bare capitalized "Lama" (a proper-noun-shaped mishear).
+    # (?-i:Lama) turns OFF the global re.I for just this token, so it matches
+    # only the capitalized form and never clobbers "lama" (Tibetan teacher)
+    # or "llama" (the animal), both of which stay lowercase in normal prose.
+    r"\b(?-i:Lama)\b": "Ollama",
     r"\bget ?hub\b": "GitHub",
 }
 
@@ -204,6 +221,39 @@ def load_dictionary():
 
 
 # ----------------------------------------------------------------------------
+# Easing for the overlay's motion. The pill grows and the transcript fades on
+# time-based tweens (not per-frame snap) — chosen "hard-S" via prototype_anim.py
+# on 2026-07-09: a cubic-bezier(.85,0,.15,1) that eases in and out steeply so
+# the height barely moves at the ends and rushes through the middle.
+# ----------------------------------------------------------------------------
+def _cubic_bezier(x1, y1, x2, y2):
+    """CSS-style cubic-bezier(x1,y1,x2,y2) timing function -> p(0..1)->value."""
+    def bez(a1, a2, t):
+        return (((1 - 3 * a2 + 3 * a1) * t + (3 * a2 - 6 * a1)) * t + 3 * a1) * t
+
+    def solve(p):
+        p = 0.0 if p < 0.0 else 1.0 if p > 1.0 else p
+        lo, hi, t = 0.0, 1.0, p
+        for _ in range(28):
+            x = bez(x1, x2, t)
+            if abs(x - p) < 1e-6:
+                break
+            if x < p:
+                lo = t
+            else:
+                hi = t
+            t = 0.5 * (lo + hi)
+        return bez(y1, y2, t)
+    return solve
+
+
+EASE_HARD_S = _cubic_bezier(0.85, 0.0, 0.15, 1.0)   # window fade + pill expand
+_EASE_CUBIC = QtCore.QEasingCurve(QtCore.QEasingCurve.InOutCubic)
+def EASE_TEXT(p):                                    # transcript fade-in
+    return _EASE_CUBIC.valueForProgress(0.0 if p < 0.0 else 1.0 if p > 1.0 else p)
+
+
+# ----------------------------------------------------------------------------
 # Overlay (Qt): frameless translucent pill, bottom-center, always on top.
 # Voice bars react to the real microphone level; smooth fades; live
 # transcript preview. Other threads set .state / .preview / .level.
@@ -228,6 +278,9 @@ class Overlay(QtWidgets.QWidget):
     DOT = {"recording": QtGui.QColor("#ff5c6a"),
            "processing": QtGui.QColor("#ffb02e")}
     TITLE = {"recording": "Listening", "processing": "Polishing…"}
+    FADE_MS = 200                 # window opacity fade (hard-S)
+    EXPAND_MS = 320               # pill height grow/shrink (hard-S)
+    TEXT_MS = 220                 # newest transcript line fade-in (InOutCubic)
 
     def __init__(self):
         super().__init__(None,
@@ -244,13 +297,24 @@ class Overlay(QtWidgets.QWidget):
         self.level = 0.0         # mic RMS 0..1, set from audio callback
 
         self._shown_state = "idle"
-        self._opacity = 0.0
         self._lvl = 0.0
         self._tick = 0
         self._heights = [3.0] * self.N_BARS
         self._phase = [random.uniform(0, 6.28) for _ in range(self.N_BARS)]
         self._speed = [random.uniform(0.35, 0.75) for _ in range(self.N_BARS)]
         self._lines = []
+        self._prev_nlines = 0
+
+        # ---- time-based tweens (hard-S expand + smooth fades) ----
+        self._opacity = 0.0            # window opacity, tweened 0<->1
+        self._op_frm = self._op_to = 0.0
+        self._op_t0 = 0.0
+        self._h = float(self.BASE_H)    # pill height, tweened toward _pill_h()
+        self._h_frm = self._h_to = self._h
+        self._h_t0 = 0.0
+        self._bf_t0 = -10.0             # newest transcript line's fade start
+        self._paint_ph = float(self.BASE_H)     # height paintEvent renders at
+        self._paint_bottom_alpha = 1.0          # newest line's opacity
 
         self.f_title = QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold)
         self.f_hint = QtGui.QFont("Segoe UI", 7)
@@ -259,26 +323,36 @@ class Overlay(QtWidgets.QWidget):
         self.setWindowOpacity(0.0)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._animate)
-        self.timer.start(33)
+        self.timer.start(16)            # ~60fps so the eased motion stays smooth
 
     # -- animation loop --------------------------------------------------------
     def _animate(self):
+        now = time.perf_counter()
         self._tick += 1
         state = self.state
         active = state in ("recording", "processing")
 
         if active and self._shown_state != state:
             self._shown_state = state
+
+        # window opacity: hard-S fade toward 1 (active) or 0 (idle)
         target_op = 1.0 if active else 0.0
-        self._opacity += (target_op - self._opacity) * 0.28
+        if target_op != self._op_to:
+            self._op_frm, self._op_to, self._op_t0 = self._opacity, target_op, now
+        op_p = min(1.0, (now - self._op_t0) * 1000.0 / self.FADE_MS)
+        self._opacity = self._op_frm + (self._op_to - self._op_frm) * EASE_HARD_S(op_p)
+
         if not active and self._opacity < 0.04:
             if self.isVisible():
                 self.hide()
                 self.preview = ""
                 self._lines = []
+                self._prev_nlines = 0
+                self._h = self._h_frm = self._h_to = float(self.BASE_H)
             return
         if active and not self.isVisible():
-            self._place()
+            self._h = self._h_frm = self._h_to = float(self.BASE_H)
+            self._place(self.BASE_H)
             self.show()
         self.setWindowOpacity(self._opacity)
 
@@ -311,10 +385,25 @@ class Overlay(QtWidgets.QWidget):
             lines.append(line)
         self._lines = lines[-2:]
 
-        pill_h = self._pill_h()
+        # a newly-appeared transcript line fades in (smooth opacity, InOutCubic)
+        if len(self._lines) > self._prev_nlines:
+            self._bf_t0 = now
+        self._prev_nlines = len(self._lines)
+        txt_p = min(1.0, (now - self._bf_t0) * 1000.0 / self.TEXT_MS)
+        self._paint_bottom_alpha = EASE_TEXT(txt_p)
+
+        # pill height: hard-S tween toward the target (no more instant snap)
+        target_h = self._pill_h()
+        if target_h != self._h_to:
+            self._h_frm, self._h_to, self._h_t0 = self._h, float(target_h), now
+        h_p = min(1.0, (now - self._h_t0) * 1000.0 / self.EXPAND_MS)
+        self._h = self._h_frm + (self._h_to - self._h_frm) * EASE_HARD_S(h_p)
+        self._paint_ph = self._h
+
         win_w = self.PILL_W + self.PAD * 2
-        if pill_h + self.PAD * 2 != self.height() or self.width() != win_w:
-            self._place(pill_h)
+        win_h = int(round(self._h)) + self.PAD * 2
+        if win_h != self.height() or win_w != self.width():
+            self._place(self._h)
         self.update()
 
     def _pill_h(self):
@@ -323,7 +412,7 @@ class Overlay(QtWidgets.QWidget):
     def _place(self, ph=None):
         # the window carries a PAD-wide transparent margin so the painted
         # shadow has room; geometry is pill size + margin on every side.
-        ph = ph or self.BASE_H
+        ph = self.BASE_H if ph is None else int(round(ph))
         win_w = self.PILL_W + self.PAD * 2
         win_h = ph + self.PAD * 2
         screen = QtGui.QGuiApplication.primaryScreen().availableGeometry()
@@ -335,7 +424,7 @@ class Overlay(QtWidgets.QWidget):
     def paintEvent(self, _ev):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
-        ph = self._pill_h()
+        ph = self._paint_ph
         px, py = self.PAD, self.PAD
         state = self._shown_state
         r = 20 if self._lines else ph / 2
@@ -403,12 +492,16 @@ class Overlay(QtWidgets.QWidget):
                    QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
                    "Ctrl · Alt · /")
 
-        # live transcript preview (older line dimmed, newest bright)
+        # live transcript preview (older line dimmed, newest bright and fading
+        # in via _paint_bottom_alpha so a fresh line doesn't pop)
         if self._lines:
             p.setFont(self.f_prev)
             for i, ln in enumerate(self._lines):
                 older = i == 0 and len(self._lines) > 1
-                p.setPen(self.PREV_OLD if older else self.PREV)
+                col = QtGui.QColor(self.PREV_OLD if older else self.PREV)
+                if i == len(self._lines) - 1:
+                    col.setAlphaF(max(0.0, min(1.0, self._paint_bottom_alpha)))
+                p.setPen(col)
                 p.drawText(QtCore.QPointF(x0,
                            py + self.BASE_H + 4 + (i + 0.75) * 17), ln)
         p.end()
