@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+localflow.log
+stdout.txt
+stderr.txt
+.claude/

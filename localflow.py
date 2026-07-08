@@ -209,15 +209,24 @@ def load_dictionary():
 # transcript preview. Other threads set .state / .preview / .level.
 # ----------------------------------------------------------------------------
 class Overlay(QtWidgets.QWidget):
-    W = 330
-    BASE_H = 40
-    N_BARS = 11
-    BG = QtGui.QColor(14, 14, 22, 238)
-    BORDER = QtGui.QColor(255, 255, 255, 26)
-    TEXT = QtGui.QColor(242, 242, 248)
-    DIM = QtGui.QColor(150, 150, 172)
-    ACCENT = {"recording": (QtGui.QColor("#ff5c6a"), QtGui.QColor("#ff8f5c")),
-              "processing": (QtGui.QColor("#ffb02e"), QtGui.QColor("#ffd36e"))}
+    # "Aurora · Mono" theme (chosen 2026-07-09 from prototype_overlay.py):
+    # near-black glass pill with a painted soft shadow + rim light, greyscale
+    # voice bars (no colour), and a small blinking state dot carrying the mode.
+    PILL_W = 344
+    BASE_H = 46
+    PAD = 26                  # transparent margin around the pill for the shadow
+    N_BARS = 12
+    BG_TOP = QtGui.QColor(17, 17, 20, 247)
+    BG_BOT = QtGui.QColor(8, 8, 10, 247)
+    RIM_A = 42                # rim-light alpha along the top edge
+    TEXT = QtGui.QColor(244, 244, 250)
+    DIM = QtGui.QColor(140, 140, 162)
+    PREV = QtGui.QColor(224, 224, 234)   # newest preview line
+    PREV_OLD = QtGui.QColor(150, 150, 160)  # dimmed older line
+    BARS = {"recording": (QtGui.QColor("#ececf2"), QtGui.QColor("#8d8d9c")),
+            "processing": (QtGui.QColor("#c9c9d4"), QtGui.QColor("#77778a"))}
+    DOT = {"recording": QtGui.QColor("#ff5c6a"),
+           "processing": QtGui.QColor("#ffb02e")}
     TITLE = {"recording": "Listening", "processing": "Polishing…"}
 
     def __init__(self):
@@ -281,15 +290,15 @@ class Overlay(QtWidgets.QWidget):
             if self._shown_state == "recording":
                 wobble = 0.4 + 0.6 * abs(math.sin(self._tick * self._speed[i]
                                                   + self._phase[i]))
-                target = 2.5 + 11 * wobble * (0.18 + 1.6 * self._lvl)
+                target = 2.5 + 11.5 * wobble * (0.18 + 1.6 * self._lvl)
             else:  # processing: gentle travelling wave
-                target = 3 + 6 * abs(math.sin(self._tick * 0.22 - i * 0.45))
-            target = min(target, 12.5)
+                target = 3 + 6.5 * abs(math.sin(self._tick * 0.22 - i * 0.45))
+            target = min(target, 13.0)
             self._heights[i] += (target - self._heights[i]) * 0.45
 
         # preview lines (wrap to 2 lines, keep the tail)
         fm = QtGui.QFontMetrics(self.f_prev)
-        avail = self.W - 48
+        avail = self.PILL_W - 48
         lines, line = [], ""
         for wd in self.preview.split():
             trial = (line + " " + wd).strip()
@@ -302,75 +311,106 @@ class Overlay(QtWidgets.QWidget):
             lines.append(line)
         self._lines = lines[-2:]
 
-        new_h = self.BASE_H + (len(self._lines) * 16 + 6 if self._lines else 0)
-        if new_h != self.height() or self.width() != self.W:
-            self._place(new_h)
+        pill_h = self._pill_h()
+        win_w = self.PILL_W + self.PAD * 2
+        if pill_h + self.PAD * 2 != self.height() or self.width() != win_w:
+            self._place(pill_h)
         self.update()
 
-    def _place(self, h=None):
-        h = h or self.BASE_H
+    def _pill_h(self):
+        return self.BASE_H + (len(self._lines) * 17 + 8 if self._lines else 0)
+
+    def _place(self, ph=None):
+        # the window carries a PAD-wide transparent margin so the painted
+        # shadow has room; geometry is pill size + margin on every side.
+        ph = ph or self.BASE_H
+        win_w = self.PILL_W + self.PAD * 2
+        win_h = ph + self.PAD * 2
         screen = QtGui.QGuiApplication.primaryScreen().availableGeometry()
-        x = screen.x() + (screen.width() - self.W) // 2
-        y = screen.y() + screen.height() - h - 56
-        self.setGeometry(x, y, self.W, h)
+        x = screen.x() + (screen.width() - win_w) // 2
+        y = screen.y() + screen.height() - win_h - 30
+        self.setGeometry(x, y, win_w, win_h)
 
     # -- painting ---------------------------------------------------------------
     def paintEvent(self, _ev):
         p = QtGui.QPainter(self)
         p.setRenderHint(QtGui.QPainter.Antialiasing)
-        w, h = self.width(), self.height()
+        ph = self._pill_h()
+        px, py = self.PAD, self.PAD
         state = self._shown_state
+        r = 20 if self._lines else ph / 2
 
-        # pill
-        r = 19 if self._lines else h / 2
-        path = QtGui.QPainterPath()
-        path.addRoundedRect(1, 1, w - 2, h - 2, r, r)
-        p.fillPath(path, self.BG)
-        pen = QtGui.QPen(self.BORDER, 1)
-        p.setPen(pen)
-        p.drawPath(path)
+        # soft painted shadow: three widening, fading layers under the pill
+        for grow, alpha in ((4, 30), (10, 15), (18, 6)):
+            sp = QtGui.QPainterPath()
+            sp.addRoundedRect(px - grow / 2, py - grow / 2 + 4,
+                              self.PILL_W + grow, ph + grow,
+                              r + grow / 2, r + grow / 2)
+            p.fillPath(sp, QtGui.QColor(0, 0, 0, alpha))
 
-        c1, c2 = self.ACCENT.get(state, (self.DIM, self.DIM))
-        grad = QtGui.QLinearGradient(20, 0, 20 + self.N_BARS * 6, 0)
+        # near-black glass body: vertical gradient
+        body = QtGui.QPainterPath()
+        body.addRoundedRect(px, py, self.PILL_W, ph, r, r)
+        g = QtGui.QLinearGradient(0, py, 0, py + ph)
+        g.setColorAt(0, self.BG_TOP)
+        g.setColorAt(1, self.BG_BOT)
+        p.fillPath(body, g)
+
+        # rim light: catches the top edge, fades toward the bottom
+        rim = QtGui.QLinearGradient(0, py, 0, py + ph)
+        rim.setColorAt(0, QtGui.QColor(255, 255, 255, self.RIM_A))
+        rim.setColorAt(0.35, QtGui.QColor(255, 255, 255, 12))
+        rim.setColorAt(1, QtGui.QColor(255, 255, 255, 7))
+        p.setPen(QtGui.QPen(QtGui.QBrush(rim), 1.2))
+        p.drawPath(body)
+
+        # greyscale voice bars (no glow — the quiet 'Mono' look)
+        c1, c2 = self.BARS.get(state, (self.DIM, self.DIM))
+        x0 = px + 22
+        grad = QtGui.QLinearGradient(x0, 0, x0 + self.N_BARS * 6, 0)
         grad.setColorAt(0, c1)
         grad.setColorAt(1, c2)
-
-        # voice bars, with a soft glow behind them
-        cy = self.BASE_H / 2
-        glow = QtGui.QColor(c1)
-        glow.setAlpha(34)
+        cy = py + self.BASE_H / 2
         for i in range(self.N_BARS):
             bh = self._heights[i]
-            bx = 20 + i * 6
-            halo = QtGui.QPainterPath()
-            halo.addRoundedRect(bx - 1.6, cy - bh - 2.2, 6.0,
-                                (bh + 2.2) * 2, 3.0, 3.0)
-            p.fillPath(halo, glow)
+            bx = x0 + i * 6
             bar = QtGui.QPainterPath()
-            bar.addRoundedRect(bx, cy - bh, 2.8, bh * 2, 1.4, 1.4)
+            bar.addRoundedRect(bx, cy - bh, 3.0, bh * 2, 1.5, 1.5)
             p.fillPath(bar, QtGui.QBrush(grad))
+
+        # state dot (red = recording, amber = polishing), gently blinking
+        tx = x0 + self.N_BARS * 6 + 12
+        dot = self.DOT.get(state)
+        if dot is not None:
+            dc = QtGui.QColor(dot)
+            if state == "recording" and (self._tick // 16) % 2:
+                dc.setAlpha(90)
+            p.setBrush(dc)
+            p.setPen(QtCore.Qt.NoPen)
+            p.drawEllipse(QtCore.QPointF(tx + 3, cy), 3.4, 3.4)
+            tx += 14
 
         # title
         p.setFont(self.f_title)
         p.setPen(self.TEXT)
-        tx = 20 + self.N_BARS * 6 + 12
-        p.drawText(QtCore.QRectF(tx, 0, 160, self.BASE_H),
+        p.drawText(QtCore.QRectF(tx, py, 170, self.BASE_H),
                    QtCore.Qt.AlignVCenter, self.TITLE.get(state, ""))
 
-        # hotkey hint, right-aligned
+        # hotkey hint, right-aligned inside the pill
         p.setFont(self.f_hint)
         p.setPen(self.DIM)
-        p.drawText(QtCore.QRectF(0, 0, w - 18, self.BASE_H),
+        p.drawText(QtCore.QRectF(px, py, self.PILL_W - 18, self.BASE_H),
                    QtCore.Qt.AlignVCenter | QtCore.Qt.AlignRight,
                    "Ctrl · Alt · /")
 
-        # preview
+        # live transcript preview (older line dimmed, newest bright)
         if self._lines:
             p.setFont(self.f_prev)
-            p.setPen(self.DIM)
             for i, ln in enumerate(self._lines):
-                p.drawText(QtCore.QPointF(20, self.BASE_H + 6 + (i + 0.7) * 16),
-                           ln)
+                older = i == 0 and len(self._lines) > 1
+                p.setPen(self.PREV_OLD if older else self.PREV)
+                p.drawText(QtCore.QPointF(x0,
+                           py + self.BASE_H + 4 + (i + 0.75) * 17), ln)
         p.end()
 
 
