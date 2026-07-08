@@ -616,7 +616,8 @@ def _tray_icon(status="idle"):
         pm = QtGui.QPixmap(ico_path)
         if not pm.isNull():
             dot_color = {"recording": QtGui.QColor("#ff5c6a"),
-                         "processing": QtGui.QColor("#ffb02e")}.get(status)
+                         "processing": QtGui.QColor("#ffb02e"),
+                         "loading": QtGui.QColor("#4da6ff")}.get(status)
             if dot_color:
                 p = QtGui.QPainter(pm)
                 p.setRenderHint(QtGui.QPainter.Antialiasing)
@@ -631,7 +632,8 @@ def _tray_icon(status="idle"):
             return QtGui.QIcon(pm)
 
     accent = {"recording": QtGui.QColor("#ff5c6a"),
-              "processing": QtGui.QColor("#ffb02e")}.get(
+              "processing": QtGui.QColor("#ffb02e"),
+              "loading": QtGui.QColor("#4da6ff")}.get(
         status, QtGui.QColor(126, 132, 170))
     pm = QtGui.QPixmap(64, 64)
     pm.fill(QtCore.Qt.transparent)
@@ -778,18 +780,42 @@ class App:
         self.hotwords = ""
         self._reload_hotwords()
 
-        log(f"Loading whisper model '{WHISPER_MODEL}'...")
+        self.whisper = None
+        self.whisper_ready = False
+
+        # Load Whisper model asynchronously in background for instant startup
+        threading.Thread(target=self._load_whisper_async, daemon=True).start()
+        threading.Thread(target=self._warm_ollama, daemon=True).start()
+
+    def _load_whisper_async(self):
+        self._set_status("loading")
+        log(f"Loading whisper model '{WHISPER_MODEL}' in background...")
         try:
-            self.whisper = WhisperModel(WHISPER_MODEL, device="cuda",
-                                        compute_type=WHISPER_COMPUTE)
+            model = WhisperModel(WHISPER_MODEL, device="cuda",
+                                 compute_type=WHISPER_COMPUTE)
             # force CUDA init now so failures surface here, not mid-dictation
-            self.whisper.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
+            model.transcribe(np.zeros(SAMPLE_RATE, dtype=np.float32))
+            with self.whisper_lock:
+                self.whisper = model
+            self.whisper_ready = True
             log(f"Whisper ready (GPU, {WHISPER_COMPUTE}).")
+            self._set_status("idle")
+            play("ready")
         except Exception as e:
-            log(f"GPU unavailable ({type(e).__name__}), using CPU int8.")
-            self.whisper = WhisperModel("small.en", device="cpu",
-                                        compute_type="int8")
-            log("Whisper ready (CPU, small.en).")
+            log(f"GPU unavailable ({type(e).__name__}) in background, using CPU int8.")
+            try:
+                model = WhisperModel("small.en", device="cpu",
+                                     compute_type="int8")
+                with self.whisper_lock:
+                    self.whisper = model
+                self.whisper_ready = True
+                log("Whisper ready (CPU, small.en).")
+                self._set_status("idle")
+                play("ready")
+            except Exception as e2:
+                log(f"Whisper initialization failed entirely: {e2}")
+                self._set_status("error")
+                play("error")
 
         threading.Thread(target=self._warm_ollama, daemon=True).start()
 
@@ -871,6 +897,13 @@ class App:
     # -- Recording ------------------------------------------------------------
     def toggle(self):
         with self.lock:
+            if not getattr(self, "whisper_ready", False) or self.whisper is None:
+                log("Hotkey pressed, but Whisper model is still loading — ignored.")
+                self.notifier.message.emit(
+                    "LocalFlow — Please wait",
+                    "Whisper model is still loading in the background. Please wait a moment.")
+                play("error")
+                return
             if self.busy:
                 log("Hotkey pressed, but still processing — ignored.")
                 return
@@ -933,7 +966,7 @@ class App:
                     continue
                 audio = audio[-SAMPLE_RATE * 30:]  # last 30s is plenty
                 with self.whisper_lock:
-                    if not self.recording:
+                    if not self.recording or self.whisper is None:
                         break
                     segments, _ = self.whisper.transcribe(
                         audio, beam_size=1, vad_filter=True,
@@ -1053,7 +1086,13 @@ class App:
             self.overlay.state = status
         if self.tray:
             self.tray.setIcon(_tray_icon(status))
-            self.tray.setToolTip(f"LocalFlow ({HOTKEY_NAME}) — {status}")
+            state_text = {
+                "idle": "idle",
+                "loading": "loading model...",
+                "recording": "recording...",
+                "processing": "polishing transcript..."
+            }.get(status, status)
+            self.tray.setToolTip(f"LocalFlow ({HOTKEY_NAME}) — {state_text}")
 
     def quit(self):
         log("Quitting.")
@@ -1131,13 +1170,12 @@ def main():
 
     threading.Thread(target=hotkey_thread, args=(app,), daemon=True).start()
     log("LocalFlow ready. Press Ctrl+Alt+/ to dictate.")
-    play("ready")
 
-    tray = QtWidgets.QSystemTrayIcon(_tray_icon("idle"))
+    tray = QtWidgets.QSystemTrayIcon(_tray_icon("loading"))
     menu = QtWidgets.QMenu()
     menu.addAction("Quit LocalFlow", app.quit)
     tray.setContextMenu(menu)
-    tray.setToolTip(f"LocalFlow ({HOTKEY_NAME}) — idle")
+    tray.setToolTip(f"LocalFlow ({HOTKEY_NAME}) — loading model...")
     tray.show()
     app.tray = tray
     app.notifier.message.connect(
