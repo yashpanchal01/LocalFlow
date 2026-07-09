@@ -39,8 +39,15 @@ LocalFlow is designed for Windows 10/11. Follow these simple steps to set it up:
 - **Ollama (Optional but Recommended)**: Download and install Ollama from [ollama.com](https://ollama.com). Running the desktop client or background service allows the setup script to automatically pull your profile's cleanup LLM.
 - **Windows Developer Mode (Optional)**: If you plan to use HuggingFace symlinks or download custom models without warnings, turning on Developer Mode in Windows Settings is recommended.
 
-### 2. Run the Installer
-Simply double-click [setup.bat](file:///c:/Users/YASH%20PANCHAL/localflow/setup.bat) (or run it via cmd/powershell):
+### 2. Download the Repository
+Open a terminal (Command Prompt, PowerShell, or Git Bash) and run:
+```cmd
+git clone https://github.com/yashpanchal01/LocalFlow.git
+cd LocalFlow
+```
+
+### 3. Run the Installer
+Run the setup script by double-clicking [setup.bat](file:///c:/Users/YASH%20PANCHAL/localflow/setup.bat) in your file explorer, or running the following in your terminal:
 ```cmd
 setup.bat
 ```
