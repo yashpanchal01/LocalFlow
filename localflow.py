@@ -102,7 +102,7 @@ CORRECTIONS = {
     # "Claude Code" — two-word mishears: a Claude-ish first token followed by
     # a code-ish second token. "claw" (as in the observed "claw code") joins
     # the existing "clawed"/"cloud"/… set.
-    r"\b(?:blood|cloud|clod|clot|claw|clawed|clogged|clout) ?"
+    r"\b(?:blood|cloud|clod|clot|claw|clawed|clogged|clout|clore|chlore) ?"
     r"(?:cold|code|coat|called|cord)\b": "Claude Code",
     # "Claude Code" — single-token smears Whisper emits as one word
     # ("broadcourt", "Claudecote", "Claudecode"). These strings have no

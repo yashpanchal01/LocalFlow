@@ -44,3 +44,88 @@ Grok
 Gemini
 OpenAI
 Copilot
+
+# More developer terms (added 2026-07-18). Keep the total list under roughly
+# 150 words — Whisper's prompt budget is ~224 tokens and a bloated list
+# dilutes the biasing for the words that matter.
+Claude Code
+Piper
+TTS
+Qwen
+PyTorch
+TensorFlow
+NumPy
+pandas
+Pydantic
+Jupyter
+Conda
+venv
+pytest
+Hugging Face
+LangChain
+RAG
+embeddings
+tokenizer
+transformer
+inference
+DeepSeek
+Mistral
+Llama
+PySide6
+Next.js
+Tailwind
+Svelte
+Vue
+Angular
+GraphQL
+REST
+OAuth
+JWT
+WebSocket
+webhook
+Redis
+MongoDB
+SQLite
+MySQL
+Supabase
+Firebase
+Vercel
+Netlify
+nginx
+AWS
+Azure
+Terraform
+PowerShell
+Bash
+Ubuntu
+WSL
+CUDA
+NVIDIA
+VRAM
+endpoint
+middleware
+boilerplate
+monorepo
+changelog
+README
+kwargs
+lambda
+enum
+async await
+dependency
+migration
+schema
+payload
+runtime
+compiler
+debugger
+breakpoint
+stack trace
+pull request
+merge conflict
+rebase
+commit
+terminal
+overlay
+transcript
+hotkey
