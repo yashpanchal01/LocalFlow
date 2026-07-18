@@ -12,3 +12,35 @@ Python
 VS Code
 API
 Anthropic
+
+# Developer terms (added 2026-07-18)
+Git
+Django
+React
+TypeScript
+JavaScript
+Node.js
+npm
+pip
+JSON
+YAML
+SQL
+Docker
+Linux
+regex
+CLI
+SDK
+LLM
+MCP
+FastAPI
+PostgreSQL
+localhost
+refactor
+repo
+frontend
+backend
+async
+Grok
+Gemini
+OpenAI
+Copilot

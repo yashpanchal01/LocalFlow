@@ -8,10 +8,11 @@ A system-wide, fully local voice dictation tool for Windows. Dictate in any text
 
 - **Dual Dictation Modes:**
   - 🔑 **Tap-to-Talk (`Ctrl + Alt + /`):** Tap once to start dictating, tap again to stop and paste. Long-press (600ms) while recording to cancel.
-  - 🗣️ **Push-to-Talk (`CapsLock`):** Hold to talk; recording captures audio as long as the key is physically held, and immediately processes and pastes upon release.
+  - 🗣️ **Push-to-Talk (`Tab`):** Hold to talk; recording captures audio as long as the key is physically held, and immediately processes and pastes upon release.
 - **Escape to Cancel (`Esc`):** Easily discard the current dictation mid-speech without pasting.
-- **AI-Powered Cleanup:** Utilizes local Ollama models (like Qwen2.5) to automatically remove filler words (*um, uh, like*), fix punctuation and capitalization, and resolve natural self-corrections (e.g., *"Monday... no wait, Tuesday"* -> *"Tuesday"*).
-- **Fallback Cleaners:** If Ollama is down, fallback regex logic cleans basic fillers so you never lose your transcription.
+- **AI-Powered Cleanup:** Utilizes local Ollama models (like Qwen2.5) to automatically remove filler words (*um, uh, like*), fix punctuation and capitalization, and resolve natural self-corrections (e.g., *"Monday... no wait, Tuesday"* -> *"Tuesday"*). The cleanup is strictly verbatim-preserving: a guard compares the polished text against the raw transcript, and any rewrite that drops sentences, shaves the opening words, or answers your dictation as if it were a question is rejected in favor of your original words.
+- **Developer-Tuned:** Whisper is biased toward programming vocabulary (Git, Django, TypeScript, MCP, regex, ...) and the polish step preserves technical terms and formats spoken code — *"get user data in api dot py returns none"* becomes `` the function `get_user_data` in `api.py` returns `None` ``.
+- **Fallback Cleaners:** If Ollama is down, fallback regex logic cleans basic fillers so you never lose your transcription — and dictations paste instantly instead of waiting on a dead connection. LocalFlow keeps probing in the background and re-enables AI cleanup automatically the moment Ollama comes back.
 - **Glassmorphic UI Overlay:** A sleek, animated dark-glass pill at the bottom of the screen displays real-time transcription progress, audio volume visualizers, and state signals (● listening / ● polishing).
 - **Persistent Dictionary:** Customize Whisper's vocabulary by adding jargon, names, or code syntax to [dictionary.txt](file:///c:/Users/YASH%20PANCHAL/localflow/dictionary.txt) — updates are live-loaded on the next dictation without restarting the app.
 
@@ -83,5 +84,5 @@ Edits to [dictionary.txt](file:///c:/Users/YASH%20PANCHAL/localflow/dictionary.t
 All other configurations sit at the top of [localflow.py](file:///c:/Users/YASH%20PANCHAL/localflow/localflow.py). You can manually edit these:
 - `OLLAMA_URL`: Default is `"http://127.0.0.1:11434"`.
 - `CLEANUP_PROMPT`: The instructions given to the LLM for editing transcriptions.
-- `PTT_VK`: The Windows virtual keycode for Push-to-Talk (default is `0x14` for `CapsLock`).
+- `PTT_VK`: The Windows virtual keycode for Push-to-Talk (default is `0x09` for `Tab`).
 - `HOTKEY_VK`: The keycode for Tap-to-Talk (default is `0xBF` for `/`).
