@@ -123,6 +123,13 @@ CORRECTIONS = {
     r"\blocal ?flow\b": "LocalFlow",
 }
 
+# Whisper's decoder has 448 token positions TOTAL for prompt + output; the
+# hotwords string rides in that window. An oversized dictionary.txt once made
+# every transcription throw "No position encodings are defined for positions
+# >= 448" — recording worked, transcription crashed. Cap keeps ~500 chars
+# (~150-180 tokens) of biasing and silently drops the rest of the list.
+HOTWORDS_MAX_CHARS = 500
+
 SAMPLE_RATE = 16000             # whisper's native rate
 SINGLE_INSTANCE_PORT = 52739    # refuses to start twice
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1210,7 +1217,15 @@ class App:
 
     def _reload_hotwords(self):
         """Re-read the user dictionary so edits apply without a restart."""
-        self.hotwords = " ".join(load_dictionary())
+        words = " ".join(load_dictionary())
+        if len(words) > HOTWORDS_MAX_CHARS:
+            words = words[:HOTWORDS_MAX_CHARS].rsplit(" ", 1)[0]
+            if not getattr(self, "_hotwords_warned", False):
+                self._hotwords_warned = True
+                log(f"dictionary.txt is over the ~{HOTWORDS_MAX_CHARS}-char "
+                    f"hotword budget; extra words are ignored. Trim it to "
+                    f"the terms Whisper actually mishears.")
+        self.hotwords = words
 
     # -- Ollama ---------------------------------------------------------------
     def _start_ollama_warmup(self):
@@ -1334,7 +1349,8 @@ class App:
                 self._last_ollama_stats = done_chunk
                 return cleaned
             log(f"Cleanup rejected ({len(text.split())}w -> "
-                f"{len(cleaned.split())}w); pasting regex-cleaned transcript.")
+                f"{len(cleaned.split())}w); pasting regex-cleaned transcript. "
+                f"LLM said: {cleaned[:160]}")
             return quick_clean(text)
         except requests.exceptions.ConnectionError as e:
             # Ollama went away (stopped, crashed, restarting). Open the breaker
@@ -1460,11 +1476,12 @@ class App:
                 with self.whisper_lock:
                     if not self.recording or self.whisper is None:
                         break
+                    # hotwords only — passing the list as initial_prompt too
+                    # doubles its footprint in the 448-position decoder window
                     segments, _ = self.whisper.transcribe(
                         audio, beam_size=1, vad_filter=True,
                         condition_on_previous_text=False,
-                        hotwords=self.hotwords,
-                        initial_prompt=self.hotwords)
+                        hotwords=self.hotwords)
                     text = " ".join(s.text.strip() for s in segments).strip()
                 if text and self.overlay and self.recording:
                     self.overlay.preview = fix_terms(text)
@@ -1513,10 +1530,13 @@ class App:
 
             t0 = time.perf_counter()
             with self.whisper_lock:
+                # condition_on_previous_text=False: prior segments would share
+                # the 448-position window with the hotwords (and Whisper's
+                # repetition loops mostly come from that conditioning anyway)
                 segments, _info = self.whisper.transcribe(
                     audio, beam_size=5, vad_filter=True,
-                    hotwords=self.hotwords,
-                    initial_prompt=self.hotwords)
+                    condition_on_previous_text=False,
+                    hotwords=self.hotwords)
                 raw = " ".join(s.text.strip() for s in segments).strip()
             t1 = time.perf_counter()
             if not raw:

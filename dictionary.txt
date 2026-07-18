@@ -1,6 +1,11 @@
 # LocalFlow dictionary — one word or name per line.
 # Whisper is biased toward these. Lines starting with '#' are ignored.
 # Edits take effect on your next dictation.
+#
+# Keep it SHORT and rare-word-only: the whole list must fit in ~500
+# characters (LocalFlow ignores the rest — see HOTWORDS_MAX_CHARS).
+# Only add proper nouns / jargon Whisper actually gets wrong; common
+# English words ("commit", "terminal") waste budget and dilute biasing.
 
 Claude Code
 Claude
@@ -12,8 +17,6 @@ Python
 VS Code
 API
 Anthropic
-
-# Developer terms (added 2026-07-18)
 Git
 Django
 React
@@ -35,97 +38,38 @@ MCP
 FastAPI
 PostgreSQL
 localhost
-refactor
-repo
-frontend
-backend
 async
 Grok
 Gemini
 OpenAI
 Copilot
-
-# More developer terms (added 2026-07-18). Keep the total list under roughly
-# 150 words — Whisper's prompt budget is ~224 tokens and a bloated list
-# dilutes the biasing for the words that matter.
-Claude Code
 Piper
-TTS
 Qwen
 PyTorch
-TensorFlow
 NumPy
-pandas
 Pydantic
-Jupyter
-Conda
-venv
 pytest
 Hugging Face
 LangChain
-RAG
-embeddings
-tokenizer
-transformer
-inference
 DeepSeek
 Mistral
 Llama
 PySide6
 Next.js
 Tailwind
-Svelte
-Vue
-Angular
 GraphQL
-REST
 OAuth
 JWT
 WebSocket
-webhook
 Redis
 MongoDB
 SQLite
-MySQL
 Supabase
 Firebase
-Vercel
-Netlify
-nginx
 AWS
-Azure
-Terraform
 PowerShell
-Bash
-Ubuntu
 WSL
 CUDA
 NVIDIA
 VRAM
-endpoint
-middleware
-boilerplate
-monorepo
-changelog
-README
-kwargs
-lambda
-enum
-async await
-dependency
-migration
-schema
-payload
-runtime
-compiler
-debugger
-breakpoint
-stack trace
-pull request
-merge conflict
-rebase
-commit
-terminal
-overlay
-transcript
-hotkey
+Matt Pocock
