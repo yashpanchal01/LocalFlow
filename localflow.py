@@ -4,7 +4,7 @@ LocalFlow — a local Wispr Flow clone.
 Two ways to dictate:
   - Tap Ctrl+Alt+/ to start recording, tap again to stop. Long-press it while
     recording to cancel.
-  - Hold CapsLock to talk (push-to-talk): recording runs while the key is
+  - Hold Tab to talk (push-to-talk): recording runs while the key is
     held and stops the moment you let go.
 Press Esc while recording to cancel.
 
@@ -17,6 +17,7 @@ Everything runs on-device. No cloud, no subscription.
 import os
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 
+import collections
 import ctypes
 import io
 import json
@@ -40,12 +41,19 @@ HOTKEY_MODS = 0x0002 | 0x0001 | 0x4000    # MOD_CONTROL | MOD_ALT | MOD_NOREPEAT
 HOTKEY_VK = 0xBF                          # VK_OEM_2, the / ? key
 HOTKEY_NAME = "Ctrl+Alt+/"
 
-# Hold-to-talk. RegisterHotKey fires WM_HOTKEY on press only (Windows never
-# sends a key-up for a registered hotkey), so the release is detected by
-# polling GetAsyncKeyState in hotkey_thread — not by a message.
-PTT_VK = 0x14                # VK_CAPITAL — hold to talk
-PTT_NAME = "CapsLock"
+# Hold-to-talk via WH_KEYBOARD_LL (not RegisterHotKey): we need both key-down
+# and key-up, and must swallow the key so it never reaches the focused app.
+PTT_VK = 0x09                # VK_TAB — hold to talk (0x14 = CapsLock)
+PTT_NAME = "Tab"
 PTT_MIN_HOLD = 0.25          # a shorter press is an accidental tap, not speech
+# Require the key to stay up this long before ending PTT. Hook KEYUPs (and
+# finger micro-lifts) can flash for a few ms while you still mean to hold;
+# without debounce that falsely drops into polishing mid-sentence.
+PTT_RELEASE_DEBOUNCE = 0.10
+# If we think Tab is down but no hook event arrives for this long, force key-up.
+# Windows auto-repeat keeps KEYDOWNs flowing while held (after ~0.5s delay);
+# a longer gap means KEYUP was lost and our held bit is ghosted.
+PTT_STALE_HELD = 1.25
 ESC_VK = 0x1B               # VK_ESCAPE — cancels an in-progress dictation
 
 WHISPER_MODEL = "distil-whisper/distil-large-v3.5-ct2"  # lower WER, same VRAM
@@ -351,119 +359,180 @@ def _cubic_bezier(x1, y1, x2, y2):
 
 EASE_HARD_S = _cubic_bezier(0.85, 0.0, 0.15, 1.0)   # window fade + pill expand
 _EASE_CUBIC = QtCore.QEasingCurve(QtCore.QEasingCurve.InOutCubic)
-def EASE_TEXT(p):                                    # transcript fade-in
+def EASE_TEXT(p):                                    # newest transcript line fade-in
     return _EASE_CUBIC.valueForProgress(0.0 if p < 0.0 else 1.0 if p > 1.0 else p)
 
 
-def draw_keycap_hint(p, rect, f_kbd, keys, text_color, dim_color):
-    """
-    Draw keybind hint with keyboard button-style representation.
-    """
-    fm = QtGui.QFontMetrics(f_kbd)
-    sep_char = "+"
-    sep_w = fm.horizontalAdvance(sep_char)
-    gap = 4
-    
-    key_widths = []
-    for key in keys:
-        kw = max(fm.horizontalAdvance(key) + 12, 18)
-        key_widths.append(kw)
-        
-    total_w = sum(key_widths) + (len(keys) - 1) * (sep_w + gap * 2)
-    
-    # Calculate starting point for right alignment
-    x0 = rect.right() - total_w
-    key_h = 16
-    y0 = rect.top() + (rect.height() - key_h) / 2.0
-    
-    p.save()
-    p.setFont(f_kbd)
-    
-    cx = x0
-    cy = y0
-    
-    # Check if light or dark theme based on text color lightness
-    is_dark_bg = text_color.lightnessF() > 0.5
-    
-    if is_dark_bg:
-        # Dark theme key styling
-        bg_grad_top = QtGui.QColor(48, 48, 56)
-        bg_grad_bot = QtGui.QColor(32, 32, 38)
-        depth_color = QtGui.QColor(14, 14, 18)
-        border_color = QtGui.QColor(76, 76, 92, 160)
-        text_pen = text_color
+def EASE_OLD_LINE(p):
+    """Hard ease-in-out quintic — snappy 150ms settle when a line scrolls up."""
+    t = 0.0 if p < 0.0 else 1.0 if p > 1.0 else p
+    if t < 0.5:
+        return 16 * t * t * t * t * t
+    return 1 - ((-2 * t + 2) ** 5) / 2
+
+
+# ----------------------------------------------------------------------------
+# Overlay helpers — Relay Pill (locked 2026-07-13 from prototype_overlay_v6)
+# ----------------------------------------------------------------------------
+_OVERLAY_GLYPHS = "!<>-_\\/[]{}=+*^?#$%&@01"
+
+
+def _ov_font(fam, px, weight=QtGui.QFont.Weight.Normal, spacing=None, stretch=None):
+    f = QtGui.QFont(fam)
+    f.setPixelSize(int(px) if isinstance(px, float) else px)
+    f.setWeight(weight)
+    if spacing:
+        f.setLetterSpacing(QtGui.QFont.SpacingType.PercentageSpacing, spacing)
+    if stretch:
+        f.setStretch(stretch)
+    return f
+
+
+def _ov_mono(px, weight=QtGui.QFont.Weight.Normal, spacing=None):
+    return _ov_font("Consolas", px, weight, spacing)
+
+
+def _ov_cond(px, weight=QtGui.QFont.Weight.DemiBold, spacing=112):
+    return _ov_font("Bahnschrift", px, weight, spacing, stretch=82)
+
+
+def _ov_tw(text, font):
+    return QtGui.QFontMetricsF(font).horizontalAdvance(text)
+
+
+def _ov_cham(x, y, w, h, tl=0, tr=0, br=0, bl=0):
+    """Chamfered rect — diagonal-cut plate language (JARVIS DNA)."""
+    pts = []
+    pts.append(QtCore.QPointF(x + tl, y) if tl else QtCore.QPointF(x, y))
+    if tr:
+        pts += [QtCore.QPointF(x + w - tr, y), QtCore.QPointF(x + w, y + tr)]
     else:
-        # Light theme key styling
-        bg_grad_top = QtGui.QColor(252, 252, 254)
-        bg_grad_bot = QtGui.QColor(226, 226, 232)
-        depth_color = QtGui.QColor(172, 172, 180)
-        border_color = QtGui.QColor(188, 188, 198)
-        text_pen = text_color
-        
-    for i, key in enumerate(keys):
+        pts.append(QtCore.QPointF(x + w, y))
+    if br:
+        pts += [QtCore.QPointF(x + w, y + h - br), QtCore.QPointF(x + w - br, y + h)]
+    else:
+        pts.append(QtCore.QPointF(x + w, y + h))
+    if bl:
+        pts += [QtCore.QPointF(x + bl, y + h), QtCore.QPointF(x, y + h - bl)]
+    else:
+        pts.append(QtCore.QPointF(x, y + h))
+    if tl:
+        pts.append(QtCore.QPointF(x, y + tl))
+    path = QtGui.QPainterPath()
+    path.addPolygon(QtGui.QPolygonF(pts))
+    path.closeSubpath()
+    return path
+
+
+def _draw_relay_hotkeys(p, rect, keys, accent):
+    """JARVIS-style chamfer chips with '+' separators (Relay locked)."""
+    f = _ov_mono(6.5, QtGui.QFont.Weight.Bold, 112)
+    fm = QtGui.QFontMetrics(f)
+    gap = 2
+    sep = "+"
+    f_sep = _ov_mono(7, QtGui.QFont.Weight.Bold, 110)
+    sep_w = _ov_tw(sep, f_sep)
+    pad_x = 5
+    key_h = 12
+    labels = [k.upper() for k in keys]
+    key_widths = [max(fm.horizontalAdvance(lab) + pad_x * 2, 14) for lab in labels]
+    total_w = sum(key_widths) + (len(keys) - 1) * (sep_w + gap * 2)
+    x0 = rect.right() - total_w
+    y0 = rect.top() + (rect.height() - key_h) / 2.0
+    cut = 3
+
+    p.save()
+    cx = x0
+    for i, lab in enumerate(labels):
         kw = key_widths[i]
-        
-        # 1. 3D shadow/depth
-        p.setPen(QtCore.Qt.NoPen)
-        p.setBrush(depth_color)
-        p.drawRoundedRect(QtCore.QRectF(cx, cy + 1, kw, key_h), 3.0, 3.0)
-        
-        # 2. Keycap body
-        body_grad = QtGui.QLinearGradient(cx, cy, cx, cy + key_h - 1)
-        body_grad.setColorAt(0, bg_grad_top)
-        body_grad.setColorAt(1, bg_grad_bot)
-        p.setBrush(body_grad)
-        p.drawRoundedRect(QtCore.QRectF(cx, cy, kw, key_h - 1), 3.0, 3.0)
-        
-        # 3. Border
-        p.setPen(QtGui.QPen(border_color, 1))
+        chip = _ov_cham(cx, y0, kw, key_h, tl=cut, br=cut)
+        fill = QtGui.QLinearGradient(cx, y0, cx, y0 + key_h)
+        fill.setColorAt(0.0, QtGui.QColor(18, 19, 14, 170))
+        fill.setColorAt(1.0, QtGui.QColor(9, 10, 7, 190))
+        p.setPen(QtGui.QPen(QtGui.QColor(accent.red(), accent.green(),
+                                         accent.blue(), 190), 1.0))
+        p.setBrush(fill)
+        p.drawPath(chip)
+        inner = _ov_cham(cx + 1.2, y0 + 1.2, kw - 2.4, key_h - 2.4,
+                         tl=max(2, cut - 1), br=max(2, cut - 1))
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 16), 1))
         p.setBrush(QtCore.Qt.NoBrush)
-        p.drawRoundedRect(QtCore.QRectF(cx + 0.5, cy + 0.5, kw - 1, key_h - 2), 2.5, 2.5)
-        
-        # 4. Text
-        p.setPen(text_pen)
-        # Shift text up slightly so it centers visually with the bottom shadow lip
-        p.drawText(QtCore.QRectF(cx, cy - 0.5, kw, key_h - 1), QtCore.Qt.AlignCenter, key)
-        
+        p.drawPath(inner)
+        p.setFont(f)
+        p.setPen(QtGui.QColor(232, 236, 226, 235))
+        p.drawText(QtCore.QRectF(cx, y0 - 0.5, kw, key_h),
+                   QtCore.Qt.AlignCenter, lab)
         cx += kw
-        
         if i < len(keys) - 1:
             cx += gap
-            p.setPen(dim_color)
-            p.drawText(QtCore.QRectF(cx, cy - 0.5, sep_w, key_h - 1), QtCore.Qt.AlignCenter, sep_char)
+            p.setFont(f_sep)
+            p.setPen(QtGui.QColor(accent.red(), accent.green(),
+                                  accent.blue(), 170))
+            p.drawText(QtCore.QRectF(cx, y0 - 0.5, sep_w, key_h),
+                       QtCore.Qt.AlignCenter, sep)
             cx += sep_w + gap
-            
     p.restore()
+
+
+class _Scramble:
+    """JARVIS-style glyph decode as live transcript grows."""
+
+    def __init__(self):
+        self.target = ""
+        self.resolve = []
+
+    def set(self, text, now, keep_prefix=True):
+        pre = 0
+        if keep_prefix:
+            m = min(len(self.target), len(text))
+            while pre < m and self.target[pre] == text[pre]:
+                pre += 1
+        self.resolve = self.resolve[:pre]
+        for i in range(pre, len(text)):
+            self.resolve.append(now + 0.028 * (i - pre) + random.random() * 0.14)
+        self.target = text
+
+    def text(self, now):
+        out = []
+        for ch, rt in zip(self.target, self.resolve):
+            if ch == " " or now >= rt:
+                out.append(ch)
+            else:
+                out.append(random.choice(_OVERLAY_GLYPHS))
+        return "".join(out)
 
 
 # ----------------------------------------------------------------------------
 # Overlay (Qt): frameless translucent pill, bottom-center, always on top.
-# Voice bars react to the real microphone level; smooth fades; live
+# Locked design: Relay Pill (prototype_overlay_v6, 2026-07-13).
+# Voice bars react to the real microphone level; hard-S fades/expand; live
 # transcript preview. Other threads set .state / .preview / .level.
 # ----------------------------------------------------------------------------
 class Overlay(QtWidgets.QWidget):
-    # "Aurora · Mono" theme (chosen 2026-07-09 from prototype_overlay.py):
-    # near-black glass pill with a painted soft shadow + rim light, greyscale
-    # voice bars (no colour), and a small blinking state dot carrying the mode.
-    PILL_W = 344
-    BASE_H = 46
-    PAD = 26                  # transparent margin around the pill for the shadow
-    N_BARS = 12
-    BG_TOP = QtGui.QColor(17, 17, 20, 247)
-    BG_BOT = QtGui.QColor(8, 8, 10, 247)
-    RIM_A = 42                # rim-light alpha along the top edge
-    TEXT = QtGui.QColor(244, 244, 250)
-    DIM = QtGui.QColor(140, 140, 162)
-    PREV = QtGui.QColor(224, 224, 234)   # newest preview line
-    PREV_OLD = QtGui.QColor(150, 150, 160)  # dimmed older line
-    BARS = {"recording": (QtGui.QColor("#ececf2"), QtGui.QColor("#8d8d9c")),
-            "processing": (QtGui.QColor("#c9c9d4"), QtGui.QColor("#77778a"))}
-    DOT = {"recording": QtGui.QColor("#ff5c6a"),
-           "processing": QtGui.QColor("#ffb02e")}
-    TITLE = {"recording": "Listening", "processing": "Polishing…"}
+    # Relay Pill — compact milspec plate · accent bars · stencil titles ·
+    # chamfer hotkeys · accent transcript · hard 150ms old-line fade.
+    PILL_W = 320
+    BASE_H = 38
+    PAD = 20
+    N_BARS = 10
+    LINE_H = 14
+    BG_TOP = QtGui.QColor(14, 15, 11, 148)
+    BG_BOT = QtGui.QColor(9, 10, 7, 168)
+    RIM_A = 28
+    ACCENT = {
+        "recording": (80, 235, 255),     # cyan RECV
+        "processing": (255, 176, 32),    # amber EXEC
+    }
+    TITLE = {"recording": "LISTENING", "processing": "POLISHING"}
+    STATE_CODE = {"recording": "RECV", "processing": "EXEC"}
+    MAIN_TAG = {"recording": "RX", "processing": "OP"}
+    HOTKEYS = ["Ctrl", "Alt", "/"]
     FADE_MS = 200                 # window opacity fade (hard-S)
     EXPAND_MS = 320               # pill height grow/shrink (hard-S)
-    TEXT_MS = 220                 # newest transcript line fade-in (InOutCubic)
+    TEXT_MS = 220                 # newest transcript line fade-in
+    OLD_LINE_ALPHA = 0.40         # settled opacity of older line
+    OLD_LINE_FADE_MS = 150        # hard ease-in-out when a line scrolls up
+    SHADOW_LAYERS = ((3, 28), (8, 14), (14, 6))
 
     def __init__(self):
         super().__init__(None,
@@ -487,27 +556,44 @@ class Overlay(QtWidgets.QWidget):
         self._speed = [random.uniform(0.35, 0.75) for _ in range(self.N_BARS)]
         self._lines = []
         self._prev_nlines = 0
+        self._state_since = time.perf_counter()
+        self._last_state = "idle"
+        self._scramble = _Scramble()
+        self._last_preview = ""
 
         # ---- time-based tweens (hard-S expand + smooth fades) ----
-        self._opacity = 0.0            # window opacity, tweened 0<->1
+        self._opacity = 0.0
         self._op_frm = self._op_to = 0.0
         self._op_t0 = 0.0
-        self._h = float(self.BASE_H)    # pill height, tweened toward _pill_h()
+        self._h = float(self.BASE_H)
         self._h_frm = self._h_to = self._h
         self._h_t0 = 0.0
-        self._bf_t0 = -10.0             # newest transcript line's fade start
-        self._paint_ph = float(self.BASE_H)     # height paintEvent renders at
-        self._paint_bottom_alpha = 1.0          # newest line's opacity
+        self._bf_t0 = -10.0
+        self._paint_ph = float(self.BASE_H)
+        self._paint_bottom_alpha = 1.0
+        self._old_line_alpha = 1.0
+        self._old_line_from = 1.0
+        self._old_line_to = 1.0
+        self._old_line_t0 = 0.0
+        self._old_line_key = None
 
-        self.f_title = QtGui.QFont("Segoe UI", 10, QtGui.QFont.DemiBold)
-        self.f_hint = QtGui.QFont("Segoe UI", 7)
-        self.f_kbd = QtGui.QFont("Segoe UI", 7, QtGui.QFont.Bold)
-        self.f_prev = QtGui.QFont("Segoe UI", 9)
+        self.f_title = _ov_cond(10, QtGui.QFont.Weight.ExtraBold, 120)
+        self.f_prev = _ov_mono(8)
+        self.f_tag = _ov_mono(7, QtGui.QFont.Weight.Bold, 112)
+        self.f_code = _ov_mono(7, QtGui.QFont.Weight.Bold, 110)
 
         self.setWindowOpacity(0.0)
         self.timer = QtCore.QTimer(self)
         self.timer.timeout.connect(self._animate)
-        self.timer.start(16)            # ~60fps so the eased motion stays smooth
+        self.timer.start(16)
+
+    def _acc(self, a=255, state=None):
+        st = state or self._shown_state
+        r, g, b = self.ACCENT.get(st, (150, 156, 142))
+        return QtGui.QColor(r, g, b, a)
+
+    def _elapsed(self):
+        return time.perf_counter() - self._state_since
 
     # -- animation loop --------------------------------------------------------
     def _animate(self):
@@ -522,6 +608,7 @@ class Overlay(QtWidgets.QWidget):
             self.preview = ""
             self._lines = []
             self._prev_nlines = 0
+            self._last_preview = ""
             self._h = self._h_frm = self._h_to = float(self.BASE_H)
             return
 
@@ -532,6 +619,11 @@ class Overlay(QtWidgets.QWidget):
 
         if active and self._shown_state != state:
             self._shown_state = state
+            self._state_since = now
+            self._last_state = state
+        elif active and state != self._last_state:
+            self._last_state = state
+            self._state_since = now
 
         # window opacity: hard-S fade toward 1 (active) or 0 (idle)
         target_op = 1.0 if active else 0.0
@@ -546,6 +638,7 @@ class Overlay(QtWidgets.QWidget):
                 self.preview = ""
                 self._lines = []
                 self._prev_nlines = 0
+                self._last_preview = ""
                 self._h = self._h_frm = self._h_to = float(self.BASE_H)
             return
         if active and not self.isVisible():
@@ -557,24 +650,24 @@ class Overlay(QtWidgets.QWidget):
         # smooth mic level
         self._lvl += (min(1.0, self.level) - self._lvl) * 0.35
 
-        # bar targets
+        # bar targets (compact Relay scale)
         for i in range(self.N_BARS):
             if self._shown_state == "recording":
                 wobble = 0.4 + 0.6 * abs(math.sin(self._tick * self._speed[i]
                                                   + self._phase[i]))
                 target = 2.5 + 11.5 * wobble * (0.18 + 1.6 * self._lvl)
-            else:  # processing: gentle travelling wave
+            else:
                 target = 3 + 6.5 * abs(math.sin(self._tick * 0.22 - i * 0.45))
             target = min(target, 13.0)
             self._heights[i] += (target - self._heights[i]) * 0.45
 
-        # preview lines (wrap to 2 lines, keep the tail)
+        # preview lines (wrap to 2, keep the tail)
         fm = QtGui.QFontMetrics(self.f_prev)
         avail = self.PILL_W - 48
         lines, line = [], ""
         for wd in self.preview.split():
             trial = (line + " " + wd).strip()
-            if fm.horizontalAdvance(trial) > avail:
+            if fm.horizontalAdvance(trial) > avail and line:
                 lines.append(line)
                 line = wd
             else:
@@ -583,14 +676,34 @@ class Overlay(QtWidgets.QWidget):
             lines.append(line)
         self._lines = lines[-2:]
 
-        # a newly-appeared transcript line fades in (smooth opacity, InOutCubic)
+        if self.preview != self._last_preview:
+            self._scramble.set(self.preview, now)
+            self._last_preview = self.preview
+
+        # newest line fade-in
         if len(self._lines) > self._prev_nlines:
             self._bf_t0 = now
         self._prev_nlines = len(self._lines)
         txt_p = min(1.0, (now - self._bf_t0) * 1000.0 / self.TEXT_MS)
         self._paint_bottom_alpha = EASE_TEXT(txt_p)
 
-        # pill height: hard-S tween toward the target (no more instant snap)
+        # older line: same accent RGB, alpha eases hard 150ms
+        if len(self._lines) > 1:
+            key = self._lines[0]
+            if key != self._old_line_key:
+                self._old_line_key = key
+                self._old_line_from = 1.0
+                self._old_line_to = self.OLD_LINE_ALPHA
+                self._old_line_t0 = now
+            t = min(1.0, (now - self._old_line_t0) * 1000.0 / self.OLD_LINE_FADE_MS)
+            e = EASE_OLD_LINE(t)
+            self._old_line_alpha = (self._old_line_from
+                                   + (self._old_line_to - self._old_line_from) * e)
+        else:
+            self._old_line_key = None
+            self._old_line_alpha = 1.0
+
+        # pill height: hard-S tween
         target_h = self._pill_h()
         if target_h != self._h_to:
             self._h_frm, self._h_to, self._h_t0 = self._h, float(target_h), now
@@ -605,11 +718,9 @@ class Overlay(QtWidgets.QWidget):
         self.update()
 
     def _pill_h(self):
-        return self.BASE_H + (len(self._lines) * 17 + 8 if self._lines else 0)
+        return self.BASE_H + (len(self._lines) * self.LINE_H + 8 if self._lines else 0)
 
     def _place(self, ph=None):
-        # the window carries a PAD-wide transparent margin so the painted
-        # shadow has room; geometry is pill size + margin on every side.
         ph = self.BASE_H if ph is None else int(round(ph))
         win_w = self.PILL_W + self.PAD * 2
         win_h = ph + self.PAD * 2
@@ -618,6 +729,38 @@ class Overlay(QtWidgets.QWidget):
         y = screen.y() + screen.height() - win_h - 30
         self.setGeometry(x, y, win_w, win_h)
 
+    def _body_path(self, px, py, w, h):
+        """Milspec silhouette: asymmetric chamfers + left mid-notch."""
+        path = QtGui.QPainterPath()
+        s = max(0.72, min(1.0, h / 46.0))
+        tl, tr = 9.0 * s, 6.0 * s
+        br, bl = 13.0 * s, 7.5 * s
+        notch_y = py + h * 0.30
+        notch_h = max(8.0, h * 0.38)
+        notch_d = 5.0 * s
+        pts = [
+            QtCore.QPointF(px + tl, py),
+            QtCore.QPointF(px + w - tr, py),
+            QtCore.QPointF(px + w, py + tr),
+            QtCore.QPointF(px + w, py + h - br),
+            QtCore.QPointF(px + w - br, py + h),
+            QtCore.QPointF(px + bl, py + h),
+            QtCore.QPointF(px, py + h - bl),
+            QtCore.QPointF(px, notch_y + notch_h),
+            QtCore.QPointF(px + notch_d, notch_y + notch_h - 2.5 * s),
+            QtCore.QPointF(px + notch_d, notch_y + 2.5 * s),
+            QtCore.QPointF(px, notch_y),
+            QtCore.QPointF(px, py + tl),
+        ]
+        path.addPolygon(QtGui.QPolygonF(pts))
+        path.closeSubpath()
+        return path
+
+    def _bar_path(self, x, y, w, h):
+        path = QtGui.QPainterPath()
+        path.addRoundedRect(QtCore.QRectF(x, y, w, h), 1.5, 1.5)
+        return path
+
     # -- painting ---------------------------------------------------------------
     def paintEvent(self, _ev):
         p = QtGui.QPainter(self)
@@ -625,25 +768,45 @@ class Overlay(QtWidgets.QWidget):
         ph = self._paint_ph
         px, py = self.PAD, self.PAD
         state = self._shown_state
-        r = 20 if self._lines else ph / 2
+        body = self._body_path(px, py, self.PILL_W, ph)
+        acc = self._acc(255)
 
-        # soft painted shadow: three widening, fading layers under the pill
-        for grow, alpha in ((4, 30), (10, 15), (18, 6)):
-            sp = QtGui.QPainterPath()
-            sp.addRoundedRect(px - grow / 2, py - grow / 2 + 4,
-                              self.PILL_W + grow, ph + grow,
-                              r + grow / 2, r + grow / 2)
-            p.fillPath(sp, QtGui.QColor(0, 0, 0, alpha))
+        # soft shadow
+        for grow, alpha in self.SHADOW_LAYERS:
+            pen = QtGui.QPen(QtGui.QColor(0, 0, 0, alpha), grow)
+            pen.setJoinStyle(QtCore.Qt.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(QtGui.QColor(0, 0, 0, alpha // 2))
+            p.drawPath(body)
 
-        # near-black glass body: vertical gradient
-        body = QtGui.QPainterPath()
-        body.addRoundedRect(px, py, self.PILL_W, ph, r, r)
+        # translucent ink plate
         g = QtGui.QLinearGradient(0, py, 0, py + ph)
-        g.setColorAt(0, self.BG_TOP)
-        g.setColorAt(1, self.BG_BOT)
+        g.setColorAt(0.0, self.BG_TOP)
+        g.setColorAt(1.0, self.BG_BOT)
         p.fillPath(body, g)
 
-        # rim light: catches the top edge, fades toward the bottom
+        # state accent outer rim
+        p.setPen(QtGui.QPen(self._acc(210), 1.5))
+        p.setBrush(QtCore.Qt.NoBrush)
+        p.drawPath(body)
+
+        # inner rim
+        inner = self._body_path(px + 2.5, py + 2.5, self.PILL_W - 5, ph - 5)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 28), 1))
+        p.drawPath(inner)
+
+        # quiet scanlines
+        br = body.boundingRect()
+        p.save()
+        p.setClipPath(body)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 3), 1))
+        y = br.top() + 2
+        while y < br.bottom():
+            p.drawLine(QtCore.QPointF(br.left(), y), QtCore.QPointF(br.right(), y))
+            y += 4
+        p.restore()
+
+        # top rim light
         rim = QtGui.QLinearGradient(0, py, 0, py + ph)
         rim.setColorAt(0, QtGui.QColor(255, 255, 255, self.RIM_A))
         rim.setColorAt(0.35, QtGui.QColor(255, 255, 255, 12))
@@ -651,54 +814,110 @@ class Overlay(QtWidgets.QWidget):
         p.setPen(QtGui.QPen(QtGui.QBrush(rim), 1.2))
         p.drawPath(body)
 
-        # greyscale voice bars (no glow — the quiet 'Mono' look)
-        c1, c2 = self.BARS.get(state, (self.DIM, self.DIM))
-        x0 = px + 22
-        grad = QtGui.QLinearGradient(x0, 0, x0 + self.N_BARS * 6, 0)
-        grad.setColorAt(0, c1)
-        grad.setColorAt(1, c2)
+        # content
+        inset_l = 20
+        x0 = px + inset_l
         cy = py + self.BASE_H / 2
-        for i in range(self.N_BARS):
-            bh = self._heights[i]
-            bx = x0 + i * 6
-            bar = QtGui.QPainterPath()
-            bar.addRoundedRect(bx, cy - bh, 3.0, bh * 2, 1.5, 1.5)
-            p.fillPath(bar, QtGui.QBrush(grad))
 
-        # state dot (red = recording, amber = polishing), gently blinking
-        tx = x0 + self.N_BARS * 6 + 12
-        dot = self.DOT.get(state)
-        if dot is not None:
-            dc = QtGui.QColor(dot)
-            if state == "recording" and (self._tick // 16) % 2:
-                dc.setAlpha(90)
-            p.setBrush(dc)
-            p.setPen(QtCore.Qt.NoPen)
-            p.drawEllipse(QtCore.QPointF(tx + 3, cy), 3.4, 3.4)
-            tx += 14
+        # accent soundwave
+        n = self.N_BARS
+        pitch = 5.0
+        grad = QtGui.QLinearGradient(x0, 0, x0 + n * pitch, 0)
+        grad.setColorAt(0, self._acc(255))
+        grad.setColorAt(1, self._acc(150))
+        for i in range(n):
+            bh = min(self._heights[i] * 0.85, 11.0)
+            bx = x0 + i * pitch
+            p.fillPath(self._bar_path(bx, cy - bh, 2.4, bh * 2), QtGui.QBrush(grad))
+        x0 += n * pitch + 8
 
-        # title
+        # LED indicator
+        pulse = 0.70 + 0.30 * abs(math.sin(self._tick * 0.12))
+        if state == "recording" and (self._tick // 18) % 2:
+            pulse = max(0.55, pulse * 0.75)
+        p.setPen(QtGui.QPen(QtGui.QColor(255, 255, 255, 50), 1))
+        p.setBrush(self._acc(int(90 + 160 * pulse)))
+        p.drawRect(QtCore.QRectF(x0, cy - 3.5, 6, 7))
+        x0 += 11
+
+        # RX:/OP: tag + stencil title + RECV/EXEC code
+        p.setFont(self.f_tag)
+        p.setPen(self._acc(240))
+        tag = self.MAIN_TAG.get(state, "SYS") + ":"
+        p.drawText(QtCore.QPointF(x0, py + self.BASE_H / 2 + 3.0), tag)
+        x0 += _ov_tw(tag, self.f_tag) + 4
+
+        title = self.TITLE.get(state, "")
         p.setFont(self.f_title)
-        p.setPen(self.TEXT)
-        p.drawText(QtCore.QRectF(tx, py, 170, self.BASE_H),
-                   QtCore.Qt.AlignVCenter, self.TITLE.get(state, ""))
+        p.setPen(self._acc(250))
+        p.drawText(QtCore.QRectF(x0, py, 150, self.BASE_H),
+                   QtCore.Qt.AlignVCenter, title)
+        title_w = _ov_tw(title, self.f_title)
 
-        # hotkey hint, right-aligned inside the pill
-        target_rect = QtCore.QRectF(px, py, self.PILL_W - 18, self.BASE_H)
-        draw_keycap_hint(p, target_rect, self.f_kbd, ["Ctrl", "Alt", "/"], self.TEXT, self.DIM)
+        code = self.STATE_CODE.get(state, "")
+        p.setFont(self.f_code)
+        p.setPen(self._acc(220))
+        p.drawText(QtCore.QPointF(x0 + title_w + 6, py + self.BASE_H / 2 + 3.0), code)
+        span = title_w + 6 + _ov_tw(code, self.f_code)
+        ly = py + self.BASE_H - 6
+        p.setPen(QtGui.QPen(self._acc(100), 1))
+        p.drawLine(QtCore.QPointF(x0, ly), QtCore.QPointF(x0 + span, ly))
+        u = self._elapsed() / 0.45
+        if u < 1.0:
+            uu = 0.0 if u < 0 else 1.0 if u > 1 else u
+            e = 1 - (1 - uu) ** 3
+            sx = x0 + e * span
+            p.setPen(QtGui.QPen(self._acc(int(245 * (1 - uu))), 1.5))
+            p.drawLine(QtCore.QPointF(max(x0, sx - 20), ly), QtCore.QPointF(sx, ly))
 
-        # live transcript preview (older line dimmed, newest bright and fading
-        # in via _paint_bottom_alpha so a fresh line doesn't pop)
+        # hotkey chips
+        _draw_relay_hotkeys(
+            p, QtCore.QRectF(px, py, self.PILL_W - 16, self.BASE_H),
+            self.HOTKEYS, acc)
+
+        # accent transcript (+ scramble decode as text grows)
         if self._lines:
             p.setFont(self.f_prev)
-            for i, ln in enumerate(self._lines):
-                older = i == 0 and len(self._lines) > 1
-                col = QtGui.QColor(self.PREV_OLD if older else self.PREV)
-                if i == len(self._lines) - 1:
+            decoded = self._scramble.text(time.perf_counter())
+            display_lines = []
+            joined = " ".join(self._lines)
+            if len(decoded) >= len(self.preview) and joined:
+                plain = self.preview
+                if plain.endswith(joined) or joined in plain:
+                    idx = plain.rfind(joined)
+                    slice_ = (decoded[idx:idx + len(joined)] if idx >= 0
+                              else decoded[-len(joined):])
+                else:
+                    slice_ = decoded[-len(joined):]
+            elif joined:
+                slice_ = (decoded + (" " * len(joined)))[:len(joined)]
+            else:
+                slice_ = ""
+            pos = 0
+            for ln in self._lines:
+                nch = len(ln)
+                piece = slice_[pos:pos + nch] if pos < len(slice_) else ln
+                out = []
+                for a, b in zip(ln, piece + " " * nch):
+                    out.append(" " if a == " " else b)
+                display_lines.append("".join(out))
+                pos += nch + 1
+
+            base = self._acc(255)
+            for i, ln in enumerate(display_lines):
+                older = i == 0 and len(display_lines) > 1
+                col = QtGui.QColor(base)
+                if older:
+                    col.setAlphaF(max(0.0, min(1.0, self._old_line_alpha)))
+                elif i == len(display_lines) - 1:
                     col.setAlphaF(max(0.0, min(1.0, self._paint_bottom_alpha)))
+                else:
+                    col.setAlphaF(1.0)
                 p.setPen(col)
-                p.drawText(QtCore.QPointF(x0,
-                           py + self.BASE_H + 4 + (i + 0.75) * 17), ln)
+                p.drawText(
+                    QtCore.QPointF(px + inset_l,
+                                   py + self.BASE_H + 3 + (i + 0.72) * self.LINE_H),
+                    ln)
         p.end()
 
 
@@ -888,6 +1107,8 @@ class App:
 
         self.whisper = None
         self.whisper_ready = False
+        # Rate-limit "still loading" toasts — PTT retries every ~30ms while held.
+        self._load_notify_at = 0.0
 
         # Load Whisper model asynchronously in background for instant startup
         threading.Thread(target=self._load_whisper_async, daemon=True).start()
@@ -1019,22 +1240,31 @@ class App:
             return quick_clean(text)
 
     # -- Recording ------------------------------------------------------------
-    def begin(self):
+    def begin(self, *, quiet=False):
         """Start a recording if we're idle and ready. Idempotent: a second call
         while already recording (or still processing) is a quiet no-op.
 
         Returns True only if a recording is actually running afterward — it can
-        still be False when Whisper isn't ready or the mic failed to open."""
+        still be False when Whisper isn't ready or the mic failed to open.
+
+        quiet=True: used by push-to-talk retries while the model loads — no
+        toast/error sound spam (at most one notify per load, ~8s apart)."""
         with self.lock:
             if not getattr(self, "whisper_ready", False) or self.whisper is None:
-                log("Hotkey pressed, but Whisper model is still loading — ignored.")
-                self.notifier.message.emit(
-                    "LocalFlow — Please wait",
-                    "Whisper model is still loading in the background. Please wait a moment.")
-                play("error")
+                now = time.perf_counter()
+                # One toast + log every 8s max (PTT polls ~30ms while Tab held).
+                if not quiet or (now - self._load_notify_at) >= 8.0:
+                    self._load_notify_at = now
+                    log("Hotkey pressed, but Whisper model is still loading — ignored.")
+                    self.notifier.message.emit(
+                        "LocalFlow — Please wait",
+                        "Whisper model is still loading in the background. Please wait a moment.")
+                    if not quiet:
+                        play("error")
                 return False
             if self.busy:
-                log("Hotkey pressed, but still processing — ignored.")
+                if not quiet:
+                    log("Hotkey pressed, but still processing — ignored.")
                 return False
             if self.recording:
                 return False
@@ -1293,24 +1523,42 @@ class App:
         os._exit(0)
 
 
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("vkCode", wintypes.DWORD), ("scanCode", wintypes.DWORD),
+                ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_void_p)]
+
+
+LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
+    wintypes.LPARAM, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+
 def hotkey_thread(app):
-    """Win32 RegisterHotKey + message loop. Must run in one thread.
+    """Win32 hotkeys + a PTT key hook + a message loop. Must run in one thread.
 
-    A registered hotkey only ever delivers WM_HOTKEY on key-DOWN — Windows never
-    sends a key-up for one. So hold-to-talk can't be driven by messages alone:
-    the release has to be polled with GetAsyncKeyState, and Esc has to be
-    grabbed/released to track app.recording, which can flip from another thread
-    when the 120s safety cutoff fires. A plain blocking GetMessageW would park
-    until the next keypress and miss both.
+    Ctrl+Alt+/ and Esc are RegisterHotKey. The PTT key is NOT: RegisterHotKey
+    only fires on press (no key-up), and we need hold/release for push-to-talk.
+    PTT goes through a WH_KEYBOARD_LL hook that returns 1 so the key never
+    reaches any app. The hook proc only enqueues down/up and posts a wake-up —
+    it must return fast or Windows silently unhooks it.
 
-    Hence MsgWaitForMultipleObjectsEx rather than GetMessageW or a bare sleep
-    loop: it blocks outright while idle (a tray app idles all day, and polling
-    at 10ms costs ~95 wakeups/sec of a core to learn nothing), yet takes a 10ms
-    timeout once a recording or a CapsLock hold is actually live."""
+    Hook events are the sole source of truth for Tab. GetAsyncKeyState is NOT
+    used for PTT: when we swallow Tab, Windows often leaves the async bit stuck
+    "down", which previously vetoed real KEYUPs and left ptt_held stuck — so the
+    next hold never re-armed. Release is debounced on hook KEYUP only (auto-
+    repeat KEYDOWNs cancel a pending release).
+
+    The loop uses a short MsgWaitForMultipleObjectsEx timeout so PTT advances
+    even if PostThreadMessage is lost, and Esc registration can track
+    app.recording cleared by the 120s safety cutoff on another thread."""
     user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
     MOD_NOREPEAT = 0x4000
     PM_REMOVE = 0x0001
-    KEYEVENTF_KEYUP = 0x0002
+    WH_KEYBOARD_LL = 13
+    WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+    WM_SYSKEYDOWN, WM_SYSKEYUP = 0x0104, 0x0105
+    WM_APP = 0x8000
 
     # id 1 = Ctrl+Alt+/ (hard requirement); a failure here is fatal as before.
     if not user32.RegisterHotKey(None, 1, HOTKEY_MODS, HOTKEY_VK):
@@ -1321,40 +1569,181 @@ def hotkey_thread(app):
         return
     log(f"Hotkey {HOTKEY_NAME} registered (Win32).")
 
-    # id 2 = CapsLock hold-to-talk. A failed registration (another app owns the
-    # key) must NOT take down Ctrl+Alt+/ — warn and carry on without PTT.
-    ptt_registered = bool(user32.RegisterHotKey(None, 2, MOD_NOREPEAT, PTT_VK))
-    if ptt_registered:
-        log(f"Push-to-talk registered: hold {PTT_NAME} (Win32).")
-    else:
-        log(f"Warning: could not register {PTT_NAME} push-to-talk "
-            f"(code {ctypes.get_last_error()}); hold-to-talk disabled.")
-
     user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     user32.GetAsyncKeyState.restype = ctypes.c_short
-    user32.GetKeyState.argtypes = [ctypes.c_int]
-    user32.GetKeyState.restype = ctypes.c_short
     user32.MsgWaitForMultipleObjectsEx.argtypes = [
         wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
         wintypes.DWORD, wintypes.DWORD]
     user32.MsgWaitForMultipleObjectsEx.restype = wintypes.DWORD
-    INFINITE = 0xFFFFFFFF
+    user32.SetWindowsHookExW.argtypes = [
+        ctypes.c_int, LowLevelKeyboardProc, wintypes.HINSTANCE, wintypes.DWORD]
+    user32.SetWindowsHookExW.restype = ctypes.c_void_p
+    user32.CallNextHookEx.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    user32.CallNextHookEx.restype = wintypes.LPARAM
     QS_ALLINPUT = 0x04FF
 
-    esc_registered = False      # id 3, kept in sync with app.recording below
-    esc_warned = False          # so a failing Esc registration logs only once
-    ptt_active = False          # a CapsLock hold is currently in progress
-    ptt_cancelled = False       # Esc was hit while the key was still held down
-    ptt_t0 = 0.0                # perf_counter() at the moment the hold began
-    caps_before = 0             # CapsLock toggle state captured at press time
+    tid = kernel32.GetCurrentThreadId()
+    ptt_events = collections.deque()
+    hook_ready = threading.Event()
+    hook_state = {}
+
+    def _hook_pump():
+        """Own the PTT key hook on a thread that does nothing but pump.
+
+        A low-level hook proc is only serviced while its installing thread is
+        inside a message-retrieval call, and Windows silently unhooks a proc
+        that outruns LowLevelHooksTimeout (~300ms). The hotkey loop below sleeps
+        up to 600ms doing long-press detection, so it must not own the hook."""
+        @LowLevelKeyboardProc
+        def _proc(n_code, w_param, l_param):
+            if n_code == 0:
+                kb = ctypes.cast(l_param,
+                                 ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                if kb.vkCode == PTT_VK:
+                    # Always swallow Tab so it never tabs/focuses other apps.
+                    # Accept injected events too — some keyboards / drivers mark
+                    # real presses as injected, and filtering them made PTT dead.
+                    if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                        ptt_events.append(True)
+                    elif w_param in (WM_KEYUP, WM_SYSKEYUP):
+                        ptt_events.append(False)
+                    user32.PostThreadMessageW(tid, WM_APP, 0, 0)
+                    return 1
+            return user32.CallNextHookEx(None, n_code, w_param, l_param)
+
+        hook_state["proc"] = _proc          # keep the thunk alive
+        # hMod must be the process module for LL hooks on some Windows builds
+        hmod = kernel32.GetModuleHandleW(None)
+        hook_state["handle"] = user32.SetWindowsHookExW(
+            WH_KEYBOARD_LL, _proc, hmod, 0)
+        if not hook_state["handle"]:
+            # fallback: NULL module (works on many setups)
+            hook_state["handle"] = user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL, _proc, None, 0)
+        hook_state["err"] = ctypes.get_last_error()
+        hook_ready.set()
+        if not hook_state["handle"]:
+            return
+        pump = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(pump), None, 0, 0) > 0:
+            pass
+
+    threading.Thread(target=_hook_pump, daemon=True).start()
+    hook_ready.wait(2.0)
+    if hook_state.get("handle"):
+        log(f"Push-to-talk active: hold {PTT_NAME} (low-level hook).")
+    else:
+        log(f"Warning: could not hook {PTT_NAME} "
+            f"(code {hook_state.get('err')}); hold-to-talk disabled.")
+
+    # ---- PTT state machine --------------------------------------------------
+    # Source of truth: low-level hook events only (see module docstring).
+    # ptt_held:   last hook level (True while Tab is down)
+    # ptt_active: we started the current recording via PTT (own the end())
+    # ptt_armed:  require a full release after external stop before re-start
+    ptt_held = False
+    ptt_active = False
+    ptt_armed = True
+    ptt_cancelled = False
+    ptt_t0 = 0.0
+    ptt_up_since = None
+    ptt_last_begin_try = 0.0
+    ptt_last_event = 0.0
+
+    esc_registered = False
+    esc_warned = False
+
+    def _finish_ptt_hold():
+        """End or cancel the active PTT hold. Clears ptt_active."""
+        nonlocal ptt_active, ptt_cancelled, ptt_up_since, ptt_held, ptt_armed
+        held = time.perf_counter() - ptt_t0
+        was_active = ptt_active
+        ptt_active = False
+        ptt_up_since = None
+        if not ptt_held:
+            ptt_armed = True
+        if not was_active:
+            return
+        if ptt_cancelled:
+            ptt_cancelled = False
+        elif not app.recording:
+            pass
+        elif held < PTT_MIN_HOLD:
+            log(f"Push-to-talk tap too short ({held:.2f}s); cancelling.")
+            app.cancel()
+        else:
+            log(f"Push-to-talk: {PTT_NAME} released after {held:.2f}s.")
+            app.end()
+
+    def _ptt_sync_held():
+        """Apply hook event queue to ptt_held. Hook only — no GetAsyncKeyState."""
+        nonlocal ptt_held, ptt_up_since, ptt_last_event
+        while ptt_events:
+            down = ptt_events.popleft()
+            ptt_last_event = time.perf_counter()
+            ptt_held = bool(down)
+            if down:
+                ptt_up_since = None
+
+    def _ptt_step():
+        """Level start while armed; release (debounced KEYUP); external end reset."""
+        nonlocal ptt_active, ptt_t0, ptt_up_since, ptt_held, ptt_armed
+        nonlocal ptt_cancelled, ptt_last_begin_try
+
+        _ptt_sync_held()
+        now = time.perf_counter()
+
+        # Lost-KEYUP recovery only when idle: a ghost "held" bit blocks re-arm
+        # (ptt_armed stays False). Do not force-up during an active hold — some
+        # setups delay/suppress Tab auto-repeat, and Esc / Ctrl+Alt+/ still stop.
+        if (ptt_held and not ptt_active and ptt_last_event
+                and (now - ptt_last_event) >= PTT_STALE_HELD):
+            log(f"Push-to-talk: stale {PTT_NAME} held state "
+                f"({now - ptt_last_event:.2f}s silent); forcing key-up.")
+            ptt_held = False
+            ptt_up_since = None
+            ptt_armed = True
+
+        # Recording ended outside PTT (Ctrl+Alt+/, Esc, safety timer) while we
+        # still thought we owned it — drop ownership so the next Tab press works.
+        if ptt_active and not app.recording:
+            ptt_active = False
+            ptt_up_since = None
+            ptt_cancelled = False
+            # If we still think Tab is down, require a real KEYUP before the
+            # next start (avoids instant re-record while user still holds).
+            # Do NOT trust GetAsyncKeyState here — swallowed Tab sticks "down".
+            ptt_armed = not ptt_held
+
+        # Held + armed + idle → begin. Quiet retries while model loads (no spam).
+        # Throttle begin attempts so we do not hammer the lock every 30ms.
+        if ptt_held and ptt_armed and not ptt_active and not app.recording:
+            if (now - ptt_last_begin_try) >= 0.15:
+                ptt_last_begin_try = now
+                if app.begin(quiet=True):
+                    ptt_active = True
+                    ptt_armed = False
+                    ptt_t0 = now
+                    ptt_up_since = None
+                    log(f"Push-to-talk: {PTT_NAME} held, recording.")
+
+        # Release path — hook KEYUP only; never re-check GetAsyncKeyState
+        # (swallowed Tab often leaves the async bit stuck down forever).
+        if ptt_active:
+            if not ptt_held:
+                if ptt_up_since is None:
+                    ptt_up_since = now
+                elif now - ptt_up_since >= PTT_RELEASE_DEBOUNCE:
+                    _finish_ptt_hold()
+            else:
+                ptt_up_since = None
+        elif not ptt_held:
+            ptt_armed = True
 
     msg = wintypes.MSG()
     while True:
-        # 1. Keep the Esc grab scoped to "while recording", so Esc behaves
-        #    normally the rest of the time. Recording can also end from the
-        #    safety-cutoff thread, so this is re-checked every pass — and it has
-        #    to happen before we decide how long to wait, or we would park with
-        #    Esc still grabbed.
+        # 1. Keep the Esc grab scoped to "while recording"
         if app.recording and not esc_registered:
             if user32.RegisterHotKey(None, 3, MOD_NOREPEAT, ESC_VK):
                 esc_registered = True
@@ -1366,28 +1755,20 @@ def hotkey_thread(app):
             user32.UnregisterHotKey(None, 3)
             esc_registered = False
 
-        # 2. Wait for something to do. Only a hotkey message can begin a
-        #    recording, so while nothing is in flight we can block outright
-        #    rather than spin: this is a tray app that idles all day, and a 10ms
-        #    poll burns ~95 wakeups/sec of a core to discover nothing happened.
-        #    Once a recording or a CapsLock hold IS live we must poll, because a
-        #    registered hotkey never delivers a key-up.
-        user32.MsgWaitForMultipleObjectsEx(
-            0, None, 10 if (app.recording or ptt_active) else INFINITE,
-            QS_ALLINPUT, 0)
+        # 2. Short timeout so PTT advances if PostThreadMessage is lost.
+        user32.MsgWaitForMultipleObjectsEx(0, None, 30, QS_ALLINPUT, 0)
 
         # 3. Drain the message queue (non-blocking).
         while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
             if msg.message != 0x0312:      # WM_HOTKEY
                 continue
-            hk = msg.wParam                # with 3 hotkeys, the id disambiguates
+            hk = msg.wParam
             if hk == 1:
                 # Ctrl+Alt+/ : tap toggles; long-press-while-recording cancels.
                 if app.recording:
                     log("Hotkey pressed while recording. Checking for long-press...")
-                    # Poll to see if keys are held for 600ms
                     is_long_press = True
-                    poll_interval = 0.015  # 15ms
+                    poll_interval = 0.015
                     steps = int(0.600 / poll_interval)
 
                     for _ in range(steps):
@@ -1403,62 +1784,34 @@ def hotkey_thread(app):
                     if is_long_press:
                         log("Long-press detected. Cancelling recording.")
                         app.cancel()
-                        # Wait for user to release all keys before continuing
+                        if ptt_active:
+                            ptt_cancelled = True
                         while (user32.GetAsyncKeyState(0x11) & 0x8000) or \
                               (user32.GetAsyncKeyState(0x12) & 0x8000) or \
                               (user32.GetAsyncKeyState(0xBF) & 0x8000):
                             time.sleep(0.05)
                     else:
                         log("Short-press detected. Stopping recording.")
+                        # If this recording was PTT-owned, release ownership so
+                        # the next Tab hold can start a new session.
+                        if ptt_active:
+                            ptt_active = False
+                            ptt_up_since = None
+                            ptt_armed = not ptt_held
                         app.toggle()
                 else:
                     log("Hotkey pressed. Starting recording.")
                     app.toggle()
-            elif hk == 2:
-                # CapsLock down = begin a hold. Capture the toggle state first so
-                # we can undo an unwanted flip once the key comes back up.
-                if not app.recording and not ptt_active:
-                    caps_before = user32.GetKeyState(PTT_VK) & 1
-                    if app.begin():
-                        ptt_active = True
-                        ptt_t0 = time.perf_counter()
-                        log(f"Push-to-talk: {PTT_NAME} held, recording.")
             elif hk == 3:
-                # Esc while recording = cancel. Leave a live CapsLock hold
-                # "active" so the release below still restores the toggle state;
-                # this flag is what stops it also calling end().
                 app.cancel()
                 if ptt_active:
                     ptt_cancelled = True
+                    ptt_active = False
+                    ptt_up_since = None
+                    ptt_armed = not ptt_held
 
-        # 4. Poll for the CapsLock release (RegisterHotKey never sends a key-up).
-        if ptt_active:
-            if not (user32.GetAsyncKeyState(PTT_VK) & 0x8000):   # physically up
-                held = time.perf_counter() - ptt_t0
-                ptt_active = False
-                # Trap 1: CapsLock can still toggle its LED/state even though the
-                # hotkey consumed the key. If it flipped, flip it back. Trap 2:
-                # the synthetic keystroke would re-fire our own id-2 hotkey, so
-                # drop that registration around it — only safe now the key is up.
-                if (user32.GetKeyState(PTT_VK) & 1) != caps_before:
-                    if ptt_registered:
-                        user32.UnregisterHotKey(None, 2)
-                    user32.keybd_event(PTT_VK, 0, 0, 0)
-                    user32.keybd_event(PTT_VK, 0, KEYEVENTF_KEYUP, 0)
-                    if ptt_registered:
-                        user32.RegisterHotKey(None, 2, MOD_NOREPEAT, PTT_VK)
-                if ptt_cancelled:
-                    ptt_cancelled = False       # Esc already discarded it
-                elif not app.recording:
-                    # the 120s safety cutoff stopped and processed this one
-                    # while the key was still down; nothing left to do
-                    pass
-                elif held < PTT_MIN_HOLD:
-                    log(f"Push-to-talk tap too short ({held:.2f}s); cancelling.")
-                    app.cancel()
-                else:
-                    log(f"Push-to-talk: {PTT_NAME} released after {held:.2f}s.")
-                    app.end()
+        # 4. PTT state machine (hook events + debounce)
+        _ptt_step()
 
 
 def main():
